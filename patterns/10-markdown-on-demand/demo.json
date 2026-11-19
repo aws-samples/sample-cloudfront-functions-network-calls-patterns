@@ -1,0 +1,172 @@
+{
+  "id": "markdown-on-demand",
+  "title": "Markdown on demand for AI agents",
+  "summary": "An AI agent (Accept: text/markdown, or an AI bot labelled by AWS WAF Bot Control) gets a markdown copy of the page when KVS says one exists; otherwise the HTML, and the function fires one cf.beacon with the page URI into SQS FIFO so a worker converts it offline.",
+  "lesson": "The one network call is the beacon, so 'does markdown exist yet?' must come from KVS, which the worker writes after it stores the .md. A beacon is best effort and billed: a dropped one only means the next agent request asks again, and the FIFO queue deduplicates the burst.",
+  "tags": [
+    "agents",
+    "ai-gateway"
+  ],
+  "hooks": [
+    "viewer-request",
+    "viewer-response"
+  ],
+  "tryPath": "/patterns/markdown-on-demand/guide.html",
+  "method": "GET",
+  "expect": "A browser: 200 text/html, x-markdown: skipped. With Accept: text/markdown the first time: 200 text/html and x-markdown: queued (one beacon). Wait about a minute (worker + KVS propagation), then the same request: 200 text/markdown, x-markdown: served. Reset this page: 200 JSON, x-markdown: reset; about a minute later the agent request is queued again.",
+  "requests": [
+    {
+      "label": "Agent asks for markdown",
+      "headers": {
+        "accept": "text/markdown"
+      }
+    },
+    {
+      "label": "A browser asks for the page",
+      "headers": {
+        "accept": "text/html"
+      }
+    },
+    {
+      "label": "Reset this page",
+      "path": "/patterns/markdown-on-demand/reset?page=guide.html"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "A markdown copy exists: the agent got the .md",
+      "when": {
+        "headers": {
+          "x-markdown": "^served$"
+        }
+      },
+      "take": [
+        "an agent",
+        "key found"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "No markdown yet: the agent got the HTML, and one beacon asked for a copy",
+      "when": {
+        "headers": {
+          "x-markdown": "^queued$"
+        }
+      },
+      "take": [
+        "an agent",
+        "KeyNotFound"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "A browser: the normal HTML page, no KVS read and no beacon",
+      "when": {
+        "headers": {
+          "x-markdown": "^skipped$"
+        }
+      },
+      "take": [
+        "a browser"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Reset queued: the worker deletes the page's KVS key and keeps the .md for edges that still have it. In about a minute the next agent request is queued again",
+      "when": {
+        "headers": {
+          "x-markdown": "^reset$"
+        }
+      },
+      "take": [
+        "reset a page"
+      ],
+      "stopAfter": "reset a page",
+      "tone": "ok"
+    }
+  ],
+  "gist": "People get the normal page; robots that prefer markdown get a markdown copy when one exists, and if not, the doorman orders one for next time.",
+  "waf": "Bot Control in count mode labels AI bots; two count rules write x-amzn-waf-ai-agent on every request here: the bot's name, or none.",
+  "actors": {
+    "V": {
+      "name": "Visitor",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "B": {
+      "name": "Gatekeeper",
+      "icon": "🛡️",
+      "at": "waf"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "K": {
+      "name": "Notebook",
+      "icon": "📒",
+      "at": "kvs",
+      "service": "CloudFront KeyValueStore (shared)",
+      "access": "read by the function; written by the worker"
+    },
+    "S": {
+      "name": "Page shelf",
+      "icon": "📚",
+      "at": "origin",
+      "service": "Amazon S3 bucket (pages and .md copies)",
+      "access": "OAC signs it (SigV4)"
+    },
+    "A": {
+      "name": "Mail clerk",
+      "icon": "📮",
+      "at": "call",
+      "service": "API Gateway REST API with an SQS integration",
+      "access": "CloudFront adds the x-api-key header"
+    },
+    "Q": {
+      "name": "Mailbox",
+      "icon": "📬",
+      "at": "backend",
+      "service": "Amazon SQS FIFO queue",
+      "access": "API Gateway's IAM role sends the message"
+    },
+    "W": {
+      "name": "Rewriter",
+      "icon": "✍️",
+      "at": "backend",
+      "lane": "background",
+      "service": "Lambda function (worker, turndown)",
+      "access": "triggered by the queue; writes the .md and the KVS key, a reset deletes the key"
+    },
+    "R": {
+      "name": "Exit greeter",
+      "icon": "👋",
+      "at": "viewer-response"
+    }
+  },
+  "story": [
+    "Every visitor passes the gatekeeper, who knows AI robots by sight (AWS WAF Bot Control).",
+    "He pins a badge on each one for the doorman: the robot's name, or none.",
+    "A visitor asks the doorman to forget a page's markdown copy.",
+    "He drops a 'please forget' note in the mail slot.",
+    "The clerk puts the note in the mailbox.",
+    "The doorman answers himself: the note is on its way.",
+    "The rewriter picks up the note.",
+    "It crosses the copy out of the notebook, gone in about a minute; the copy stays on the shelf.",
+    "A person asks for a page.",
+    "A person gets the normal page, no notebook, no note.",
+    "A robot that prefers markdown asks for the page.",
+    "The doorman checks his notebook for a markdown copy.",
+    "Yes, and here is where it is.",
+    "He sends the robot to the markdown copy.",
+    "No copy yet: he drops a 'please convert' note in the mail slot.",
+    "The clerk puts the note in the mailbox.",
+    "Meanwhile the robot gets the normal page.",
+    "The rewriter picks up the note.",
+    "It reads the page and writes a markdown copy.",
+    "It notes the copy in the notebook, ready in about a minute.",
+    "The shelf hands over the page.",
+    "On the way out, the greeter says which one you got."
+  ]
+}

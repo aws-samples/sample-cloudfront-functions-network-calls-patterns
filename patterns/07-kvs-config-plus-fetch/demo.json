@@ -1,0 +1,154 @@
+{
+  "id": "kvs-config-plus-fetch",
+  "title": "Read-through config: KVS first, fetch on a miss, hot keys promoted",
+  "summary": "The function reads a key's config (a tenant's plan, a model route, a rate limit) from KVS; on a miss it makes one call to the origin, which counts the read, and a key read 5 times in a minute is promoted into KVS for 10 minutes.",
+  "lesson": "Read through KVS: a hit costs no call, a miss costs one, and only hot keys earn a place in KVS, written off the request path. Fail open: serve the expired copy, else a default, and always forward the request.",
+  "tags": [
+    "ai-gateway",
+    "config"
+  ],
+  "tryPath": "/patterns/kvs-config-plus-fetch/acme",
+  "method": "GET",
+  "expect": "200 JSON echo with x-config-source origin and x-config-hits n/5 on a cold key; after 5 reads in a minute, about a minute later x-config-source kvs with no call.",
+  "requests": [
+    {
+      "label": "Read acme"
+    },
+    {
+      "label": "Read globex",
+      "path": "/patterns/kvs-config-plus-fetch/globex"
+    },
+    {
+      "label": "Read an unknown key",
+      "path": "/patterns/kvs-config-plus-fetch/initech"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "Fresh copy in KVS: answered at the edge, no call",
+      "when": {
+        "headers": {
+          "x-config-source": "^kvs$"
+        }
+      },
+      "take": [
+        "fresh entry"
+      ],
+      "lastStep": 10,
+      "tone": "ok"
+    },
+    {
+      "label": "Miss: fetched from the origin, and that read made the key hot, so it gets promoted to KVS",
+      "when": {
+        "headers": {
+          "x-config-source": "^origin$",
+          "x-config-hits": "^(\\d+)/\\1$"
+        }
+      },
+      "take": [
+        "miss or expired"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Miss: one call fetched it from the origin and counted the read",
+      "when": {
+        "headers": {
+          "x-config-source": "^origin$"
+        }
+      },
+      "take": [
+        "miss or expired"
+      ],
+      "lastStep": 10,
+      "tone": "ok"
+    },
+    {
+      "label": "The call failed: served the expired copy from KVS",
+      "when": {
+        "headers": {
+          "x-config-source": "^kvs-stale$"
+        }
+      },
+      "take": [
+        "call fails"
+      ],
+      "lastStep": 10,
+      "tone": "warn"
+    },
+    {
+      "label": "The call failed and KVS had nothing: default config",
+      "when": {
+        "headers": {
+          "x-config-source": "^default$"
+        }
+      },
+      "take": [
+        "call fails"
+      ],
+      "lastStep": 10,
+      "tone": "warn"
+    }
+  ],
+  "gist": "The doorman looks in his notebook first and phones the clerk only when it is not there; settings asked for often get copied into the notebook by themselves.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "K": {
+      "name": "Notebook",
+      "icon": "📒",
+      "at": "kvs",
+      "service": "CloudFront KeyValueStore (shared)",
+      "access": "read by the function; written by the promoter (UpdateKeys)"
+    },
+    "L": {
+      "name": "Config clerk",
+      "icon": "🗂️",
+      "at": "origin",
+      "service": "Lambda Web Function",
+      "access": "OAC signs it (SigV4)"
+    },
+    "D": {
+      "name": "Tally board",
+      "icon": "🧮",
+      "at": "backend",
+      "service": "DynamoDB table (hit counters)",
+      "access": "the origin Lambda's IAM role; its stream feeds the promoter"
+    },
+    "P": {
+      "name": "Promoter",
+      "icon": "📣",
+      "at": "backend",
+      "lane": "background",
+      "service": "Lambda function (promoter)",
+      "access": "triggered by the table's stream"
+    }
+  },
+  "story": [
+    "You ask for the settings for acme.",
+    "The doorman rubs out any settings you wrote yourself.",
+    "He looks in his notebook first.",
+    "A fresh copy is there: no phone call.",
+    "Not there, or too old: he asks the config clerk.",
+    "The clerk adds a tick to acme's tally for this minute.",
+    "Here are the settings, and the tally so far.",
+    "The clerk did not answer: an old copy, or the default.",
+    "You go in carrying the settings.",
+    "You see which settings you got, and where from.",
+    "Behind the scenes, separate from your visit:",
+    "Five ticks in one minute: acme is popular.",
+    "The promoter pins a ten-minute marker on the board.",
+    "The marker is up.",
+    "The promoter copies acme's settings into the notebook.",
+    "Ten minutes later the marker falls off.",
+    "The promoter rubs acme out of the notebook again."
+  ]
+}

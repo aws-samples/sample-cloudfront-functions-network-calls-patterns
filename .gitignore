@@ -1,0 +1,11 @@
+node_modules/
+cdk.out/
+cdk.context.json
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+*.log
+dev3-artifact-report/
+.dev3/
+.claude/

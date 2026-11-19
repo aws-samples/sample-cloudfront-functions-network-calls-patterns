@@ -1,0 +1,16 @@
+{
+  "name": "ab-global-table-lambda",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "The origin (a Fastify server on a Lambda Web Function, index.js) and the stream handler for pattern 04. The KVS client and the SigV4a signer are bundled: the KVS data plane needs SigV4a, which the Lambda-provided SDK does not ship.",
+  "dependencies": {
+    "@aws-sdk/client-cloudfront-keyvaluestore": "3.1135.0",
+    "@aws-sdk/client-dynamodb": "3.1135.0",
+    "@aws-sdk/signature-v4a": "3.1111.0",
+    "fastify": "5.12.8"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

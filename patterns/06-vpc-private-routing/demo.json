@@ -1,0 +1,101 @@
+{
+  "id": "vpc-private-routing",
+  "title": "Private routing decision from a VPC origin",
+  "summary": "The function asks an internal ALB (CloudFront VPC origin, no public address) which backend a tenant belongs to, then rewrites the URI to that backend.",
+  "lesson": "Call a private service from the edge without exposing it, and keep a KVS kill switch that skips the network call entirely.",
+  "tags": [
+    "ai-gateway",
+    "routing"
+  ],
+  "tryPath": "/patterns/vpc-private-routing/whoami?tenant=acme",
+  "method": "GET",
+  "expect": "JSON with backend \"blue\" or \"green\" (stable per tenant) and headersFromFunction.x-backend set by the function. A failed call forwards unchanged: backend \"none\" and x-vpc-private-routing-error.",
+  "requests": [
+    {
+      "label": "Tenant acme"
+    },
+    {
+      "label": "Tenant globex",
+      "path": "/patterns/vpc-private-routing/whoami?tenant=globex"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "Kill switch off: no call, request forwarded unchanged",
+      "when": {
+        "headers": {
+          "x-backend": "^off$"
+        }
+      },
+      "take": [
+        "kill switch"
+      ],
+      "tone": "warn"
+    },
+    {
+      "label": "The private ALB chose a backend; the URI was rewritten",
+      "when": {
+        "json": {
+          "backend": "^(blue|green)$"
+        }
+      },
+      "take": [
+        "routing on"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Routing call failed: forwarded unchanged",
+      "when": {
+        "json": {
+          "backend": "^none$"
+        }
+      },
+      "take": [
+        "routing on"
+      ],
+      "tone": "warn",
+      "skip": [
+        "{\"backend\"",
+        "uri ="
+      ]
+    }
+  ],
+  "gist": "The doorman asks a back office nobody else can reach which room is yours.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "K": {
+      "name": "Notebook",
+      "icon": "📒",
+      "at": "kvs",
+      "service": "CloudFront KeyValueStore (shared)",
+      "access": "associated with the function; read with cf.kvs()"
+    },
+    "A": {
+      "name": "Back office",
+      "icon": "🏢",
+      "at": "origin",
+      "service": "Internal Application Load Balancer, Lambda target",
+      "access": "CloudFront VPC origin: private subnets, no public address"
+    }
+  },
+  "story": [
+    "You arrive and say which company you are with.",
+    "The doorman checks the on/off switch in his notebook.",
+    "Switch off: no question asked, you go in as you are.",
+    "Switch on: he asks the back office where your company sits.",
+    "Blue room or green room.",
+    "He points you to that room.",
+    "You walk to the room.",
+    "The room answers."
+  ]
+}

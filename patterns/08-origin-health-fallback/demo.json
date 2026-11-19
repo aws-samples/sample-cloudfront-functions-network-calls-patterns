@@ -1,0 +1,138 @@
+{
+  "id": "origin-health-fallback",
+  "title": "POST failover: origin health probe + secondary",
+  "summary": "Failover for POST traffic, which origin groups cannot do: when gated on, the request function probes GET /health on the primary with cf.fetch and, if it times out (the runtime's fixed 1 s) or is down, sends the POST to a secondary Lambda Web Function with selectRequestOriginById. GET/HEAD also get a runtime origin group (S3 mirror on 5xx).",
+  "lesson": "Origin groups only fail over GET/HEAD/OPTIONS, and viewer-response never runs for status 400+, so for POST the edge function is the only place to decide before the request is sent. Gate the probe (KVS health-probe) or you pay a call per request; fail open when the call is unavailable.",
+  "tags": [
+    "ai-gateway",
+    "resilience"
+  ],
+  "hooks": [
+    "viewer-request",
+    "viewer-response"
+  ],
+  "tryPath": "/patterns/origin-health-fallback/infer?probe=on&simulate=slow",
+  "method": "POST",
+  "expect": "The primary's /health sleeps 1.5 s, past the fixed 1 s runtime timeout: x-health-probe: unhealthy:timeout, x-route: fallback, and the secondary answers the POST: x-served-by: secondary, x-fallback: true, body servedBy \"secondary\".",
+  "body": {
+    "prompt": "Say hello in one word",
+    "max_tokens": 8
+  },
+  "requests": [
+    {
+      "label": "Slow primary (1.5 s /health)"
+    },
+    {
+      "label": "Healthy primary",
+      "path": "/patterns/origin-health-fallback/infer?probe=on"
+    },
+    {
+      "label": "Probe gate off",
+      "path": "/patterns/origin-health-fallback/infer"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "Primary timed out or down: the POST went to the secondary",
+      "when": {
+        "headers": {
+          "x-route": "^fallback$"
+        }
+      },
+      "take": [
+        "probe gate on",
+        "non-2xx"
+      ],
+      "tone": "warn",
+      "skip": [
+        "GET and HEAD"
+      ]
+    },
+    {
+      "label": "Probe healthy: the POST went to the primary",
+      "when": {
+        "headers": {
+          "x-health-probe": "^ok"
+        }
+      },
+      "take": [
+        "probe gate on",
+        "healthy"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Probe gated off: straight to the primary, no call",
+      "when": {
+        "headers": {
+          "x-health-probe": "^(off|unavailable)"
+        }
+      },
+      "take": [
+        "probe gate off",
+        "healthy"
+      ],
+      "tone": "ok"
+    }
+  ],
+  "gist": "Before passing on your order, the doorman checks the main kitchen is quick; if not, the backup kitchen cooks it.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "K": {
+      "name": "Notebook",
+      "icon": "📒",
+      "at": "kvs",
+      "service": "CloudFront KeyValueStore (shared)",
+      "access": "associated with the function; read with cf.kvs()"
+    },
+    "P": {
+      "name": "Main kitchen",
+      "icon": "🍳",
+      "at": "origin",
+      "service": "Lambda Web Function (primary)",
+      "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+    },
+    "S": {
+      "name": "Backup kitchen",
+      "icon": "🧑‍🍳",
+      "at": "origin",
+      "service": "Lambda Web Function (secondary)",
+      "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+    },
+    "M": {
+      "name": "Photo menu",
+      "icon": "🖼️",
+      "at": "origin",
+      "service": "Amazon S3 bucket (static mirror)",
+      "access": "OAC signs it (SigV4)"
+    },
+    "R": {
+      "name": "Exit greeter",
+      "icon": "👋",
+      "at": "viewer-response"
+    }
+  },
+  "story": [
+    "You hand in an order.",
+    "The doorman checks whether to test the kitchen first.",
+    "No test: the order goes to the main kitchen.",
+    "Test: are you quick today? He waits one second at most.",
+    "The kitchen answers.",
+    "Quick: your order goes to the main kitchen.",
+    "The main kitchen cooks it.",
+    "Too slow or closed: your order goes to the backup kitchen.",
+    "Just looking? You would see the photo menu instead.",
+    "The backup kitchen cooks it.",
+    "The greeter notes which kitchen cooked.",
+    "You get your food."
+  ]
+}

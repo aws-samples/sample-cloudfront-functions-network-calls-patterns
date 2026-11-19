@@ -1,0 +1,98 @@
+{
+  "id": "edge-signal-sqs",
+  "title": "Edge signal to SQS, no Lambda",
+  "summary": "The request function fires one small JSON event with cf.beacon into an SQS FIFO queue through an API Gateway service integration; the response function beacons a second 'served' event only on demand (x-signal-sample: 1). Its 5xx condition never fires: CloudFront does not run viewer-response when the origin answers 400 or more.",
+  "lesson": "API Gateway is the signing proxy for SigV4-only services; cf.beacon makes the signal fire-and-forget (still the one call per invocation, available wherever cf.fetch is); and a response-side call runs on cache hits too, so it must be rare by construction.",
+  "tags": [
+    "ai-gateway",
+    "telemetry"
+  ],
+  "hooks": [
+    "viewer-request",
+    "viewer-response"
+  ],
+  "tryPath": "/patterns/edge-signal-sqs/hello",
+  "method": "GET",
+  "expect": "JSON echo with headersFromFunction.x-signal = \"beacon\" and x-signal-served: skipped on the response; one requested event in the queue. Send x-signal-sample: 1 for x-signal-served: beacon and a second queue message. /boom returns 503 with NO x-signal-served header: CloudFront skips viewer-response on origin 4xx/5xx.",
+  "requests": [
+    {
+      "label": "Try it"
+    },
+    {
+      "label": "Sample the response (x-signal-sample: 1)",
+      "headers": {
+        "x-signal-sample": "1"
+      }
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "One beacon: the response function skipped its call",
+      "when": {
+        "headers": {
+          "x-signal-served": "^skipped$"
+        }
+      },
+      "take": [
+        "otherwise"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Two beacons: requested and served",
+      "when": {
+        "headers": {
+          "x-signal-served": "^beacon$"
+        }
+      },
+      "take": [
+        "status 5xx"
+      ],
+      "tone": "ok"
+    }
+  ],
+  "gist": "The doorman drops a note in the mailbox as you pass, without slowing you down.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "A": {
+      "name": "Mail clerk",
+      "icon": "📮",
+      "at": "origin",
+      "service": "API Gateway REST API with an SQS integration",
+      "access": "CloudFront adds the x-api-key header"
+    },
+    "Q": {
+      "name": "Mailbox",
+      "icon": "📬",
+      "at": "backend",
+      "service": "Amazon SQS FIFO queue",
+      "access": "API Gateway's IAM role sends the message"
+    },
+    "R": {
+      "name": "Exit greeter",
+      "icon": "👋",
+      "at": "viewer-response"
+    }
+  },
+  "story": [
+    "You walk in.",
+    "The doorman drops a 'someone came' note in the mail slot.",
+    "The clerk puts it in the mailbox.",
+    "Nobody waits for the note; you keep walking.",
+    "You reach the room.",
+    "The room answers.",
+    "Asked for a sample, the exit greeter drops a 'they left' note too.",
+    "That note lands in the mailbox as well.",
+    "Most times the greeter sends nothing.",
+    "You get your page."
+  ]
+}
