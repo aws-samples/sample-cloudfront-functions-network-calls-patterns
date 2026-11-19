@@ -1,0 +1,32 @@
+{
+  "name": "cloudfront-functions-network-call-patterns",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Patterns for CloudFront Functions network calls (cf.fetch) on one shared distribution",
+  "license": "MIT-0",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "postinstall": "node scripts/install-origins.mjs",
+    "test": "npm run check:functions && node --test scripts/*.test.mjs patterns/*/test/*.test.mjs patterns/*/*.test.mjs && node patterns/05-edge-signal-sqs/test.mjs && npm run test:infra",
+    "test:infra": "node --import tsx --test infra/test/*.test.ts",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "diff": "cdk diff",
+    "check:function-size": "node scripts/check-function-size.mjs",
+    "check:no-await-in-args": "node scripts/check-no-await-in-args.mjs",
+    "check:functions": "npm run check:function-size && npm run check:no-await-in-args && npm run check:no-for-of",
+    "check:no-for-of": "node scripts/check-no-for-of.mjs",
+    "diagrams": "node scripts/build-architecture.mjs",
+    "check:diagrams": "node scripts/build-architecture.mjs --check"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.5",
+    "aws-cdk": "2.1148.1",
+    "aws-cdk-lib": "2.277.0",
+    "constructs": "10.8.1",
+    "jsdom": "25.0.1",
+    "mermaid": "12.3.0",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "edge-waiting-room-admission",
+  "private": true,
+  "type": "module",
+  "description": "Admission Lambda for pattern 11. Only the KVS client is bundled: it needs SigV4a, which the Lambda-provided SDK does not ship.",
+  "dependencies": {
+    "@aws-sdk/client-cloudfront-keyvaluestore": "3.1157.0",
+    "@aws-sdk/signature-v4a": "3.1138.0"
+  }
+}

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Start page (static fallback)</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 36rem; margin: 4rem auto; padding: 0 1rem; color: #222; }
+  .banner { background: #fff4d6; border: 1px solid #e0b64a; padding: .6rem 1rem; border-radius: .4rem; }
+  code { background: #f3f3f3; padding: 0 .3em; }
+</style>
+</head>
+<body>
+<p class="banner">We are having trouble reaching our servers, so this is a saved copy of the page. It may be a little out of date. Reading works; anything that saves or buys will not until we are back.</p>
+<h1>Start page</h1>
+<p>This is the static mirror in S3 for <code>/patterns/origin-health-fallback/index.html</code>. In a real site this bucket holds a recent export of the pages worth keeping up when the dynamic origin is down.</p>
+<p>What you can do: wait a minute and reload; if you were in the middle of something, check before repeating it.</p>
+<p><small>Response header <code>x-served-by: fallback</code>. If the request also carries <code>x-route: fallback</code>, the edge probe decided this; if it says <code>primary</code>, the origin group failed over on a 5xx.</small></p>
+</body>
+</html>
