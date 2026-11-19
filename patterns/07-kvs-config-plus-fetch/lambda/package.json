@@ -1,0 +1,13 @@
+{
+  "name": "kvs-config-plus-fetch-lambda",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "Origin (a Fastify server on a Lambda Web Function) and promoter for pattern 07. Every SDK client is bundled; the KVS client also needs the SigV4a signer, which the Lambda-provided SDK does not ship.",
+  "dependencies": {
+    "@aws-sdk/client-cloudfront-keyvaluestore": "3.1135.0",
+    "@aws-sdk/client-dynamodb": "3.1135.0",
+    "@aws-sdk/signature-v4a": "3.1111.0",
+    "fastify": "5.12.8"
+  }
+}

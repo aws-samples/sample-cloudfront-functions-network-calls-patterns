@@ -1,0 +1,129 @@
+{
+  "id": "cognito-auth",
+  "title": "Cognito token check at the edge",
+  "summary": "A CloudFront Function validates the viewer's Cognito access token with one cf.fetch and forwards the request with x-user-sub, replacing an API Gateway Lambda authorizer.",
+  "lesson": "An AWS service reached without SigV4, and the auth decision made before the origin ever sees the request.",
+  "tags": [
+    "ai-gateway",
+    "auth"
+  ],
+  "tryPath": "/patterns/cognito-auth/whoami",
+  "method": "GET",
+  "expect": "Sign in as the demo user: the page gets a real Cognito access token from GET /patterns/cognito-auth/token (the password stays server-side), then calls whoami with it; the echo origin returns the x-user-sub and x-user-name the function injected. A forged x-user-sub is deleted before the check, so the real sub comes back. Without a token: 401 {\"error\":\"missing_token\"}, no call. A made-up token gets 401 invalid_token; Cognito unreachable gets 503 auth_unavailable (fail closed).",
+  "requests": [
+    {
+      "label": "Sign in as the demo user",
+      "bearerFrom": "/patterns/cognito-auth/token"
+    },
+    {
+      "label": "Forged x-user-sub",
+      "bearerFrom": "/patterns/cognito-auth/token",
+      "headers": {
+        "x-user-sub": "forged"
+      }
+    },
+    {
+      "label": "Made-up token",
+      "headers": {
+        "authorization": "Bearer not-a-real-token"
+      }
+    },
+    {
+      "label": "No token"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "No bearer token: answered 401 at the edge, no call made",
+      "when": {
+        "status": 401,
+        "json": {
+          "error": "^missing_token$"
+        }
+      },
+      "take": [
+        "no bearer token"
+      ],
+      "tone": "bad"
+    },
+    {
+      "label": "Cognito rejected the token: 401 invalid_token",
+      "when": {
+        "status": 401,
+        "json": {
+          "error": "^invalid_token$"
+        }
+      },
+      "take": [
+        "token present",
+        "Cognito non-2xx"
+      ],
+      "tone": "bad"
+    },
+    {
+      "label": "Cognito unreachable: 503, failing closed",
+      "when": {
+        "status": 503
+      },
+      "take": [
+        "token present",
+        "error or timeout"
+      ],
+      "tone": "bad"
+    },
+    {
+      "label": "Cognito accepted the token; the origin saw the identity the function injected",
+      "when": {
+        "status": 200,
+        "json": {
+          "identity.x-user-name": "^demo-user$",
+          "identity.x-user-sub": "^[0-9a-f-]{36}$"
+        }
+      },
+      "take": [
+        "token present",
+        "Cognito 2xx"
+      ],
+      "tone": "ok"
+    }
+  ],
+  "gist": "The doorman checks your ID card with the ID office before you get in.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "C": {
+      "name": "ID office",
+      "icon": "🪪",
+      "at": "call",
+      "service": "Amazon Cognito user pool API (extra HTTPS origin)",
+      "access": "public AWS endpoint; the access token is the credential"
+    },
+    "O": {
+      "name": "Your app",
+      "icon": "🏠",
+      "at": "origin",
+      "service": "Lambda Web Function (IamAuth endpoint)",
+      "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+    }
+  },
+  "story": [
+    "You knock, maybe holding an ID card.",
+    "The doorman rubs out any name you wrote yourself.",
+    "No ID card? Not today (401).",
+    "The doorman asks the ID office: is this card real?",
+    "Yes, and here is who you are.",
+    "The doorman writes your real name on your ticket.",
+    "The app greets you by name.",
+    "A fake card: not today (401).",
+    "The ID office did not answer, so nobody gets in (503)."
+  ],
+  "waf": "One rule on this pattern's path: a per-IP rate limit on the demo token route (/patterns/cognito-auth/token), 10 requests a minute. whoami itself has no rule."
+}

@@ -1,0 +1,321 @@
+{
+  "id": "edge-waiting-room",
+  "title": "Edge waiting room",
+  "summary": "A virtual waiting room at the edge. A new browser (past AWS WAF's CAPTCHA) spends the function's one cf.fetch to draw a ticket from a DynamoDB counter (API Gateway, no Lambda); every refresh after that compares the signed ticket cookie with a watermark in KVS, with no call. An admission Lambda raises the watermark once a minute.",
+  "lesson": "The queue is two integers, a counter and a watermark, and membership is an HMAC-signed cookie: the one network call is spent once per viewer, never per refresh. Here the call IS the protection, so it fails closed, the reverse of 03 and 08.",
+  "tags": [
+    "resilience"
+  ],
+  "hooks": [
+    "viewer-request"
+  ],
+  "tryPath": "/patterns/edge-waiting-room/shop",
+  "method": "GET",
+  "expect": "Try it (a fetch, not a page load): 503, x-wr: browsers-only, no ticket. Open it in a browser tab instead: one AWS WAF CAPTCHA (only on this path), then a waiting page with your ticket and your position; within about two minutes (one admission tick plus KVS propagation) a 302 sets wr_a and the protected origin's JSON says x-wr: admitted.",
+  "requests": [
+    {
+      "label": "Join the queue",
+      "frame": {
+        "milestones": [
+          "Prove you're a person",
+          "Ticket drawn",
+          "Waiting",
+          "Admitted"
+        ],
+        "skipUnlessSeen": [
+          {
+            "seen": [
+              "captcha",
+              "challenge"
+            ],
+            "steps": [
+              "GET /patterns/edge-waiting-room/shop, no aws-waf-token",
+              "405 CAPTCHA on the first visit"
+            ],
+            "note": "No CAPTCHA this time: your browser already had AWS WAF's token."
+          },
+          {
+            "seen": [
+              "queued",
+              "busy",
+              "starting"
+            ],
+            "steps": [
+              "GET + aws-waf-token",
+              "request + x-amzn-waf-wr-token-id",
+              "get queue-state, queue-secret-cur, queue-secret-prev"
+            ]
+          },
+          {
+            "seen": [
+              "queued",
+              "busy"
+            ],
+            "steps": [
+              "cf.fetch POST /patterns/enqueue"
+            ]
+          },
+          {
+            "seen": [
+              "queued"
+            ],
+            "steps": [
+              "UpdateItem",
+              "{\"n\": 42}",
+              "200 waiting page + wr_t"
+            ],
+            "note": "No new ticket: you already hold one, so the doorman makes no call."
+          },
+          {
+            "seen": [
+              "waiting",
+              "paused"
+            ],
+            "steps": [
+              "GET + wr_t",
+              "get queue-state",
+              "200 waiting page, position, no call"
+            ],
+            "note": "No wait: your number was already being served."
+          }
+        ],
+        "states": [
+          {
+            "id": "captcha",
+            "milestone": 0,
+            "show": true,
+            "label": "AWS WAF asks for a CAPTCHA on the first visit: solve it in the frame below to join the queue",
+            "when": {
+              "selector": "#captcha-container"
+            },
+            "take": [
+              "a browser"
+            ],
+            "lastStep": 12,
+            "tone": "warn"
+          },
+          {
+            "id": "challenge",
+            "milestone": 0,
+            "label": "AWS WAF's silent challenge: your browser is proving it is a browser",
+            "when": {
+              "selector": "#challenge-container"
+            },
+            "take": [
+              "a browser"
+            ],
+            "lastStep": 12,
+            "tone": "ok"
+          },
+          {
+            "id": "admitted",
+            "milestone": 3,
+            "done": true,
+            "label": "Admitted: the protected origin answered, {message}",
+            "when": {
+              "json": {
+                "x-wr": "^admitted$"
+              }
+            },
+            "take": [
+              "a browser"
+            ],
+            "tone": "ok"
+          },
+          {
+            "id": "queued",
+            "milestone": 1,
+            "label": "Ticket {1} drawn: the function's one cf.fetch added one to the counter",
+            "when": {
+              "text": "Your ticket is (\\d+)"
+            },
+            "take": [
+              "a browser"
+            ],
+            "lastStep": 19,
+            "tone": "ok"
+          },
+          {
+            "id": "waiting",
+            "milestone": 2,
+            "label": "In line: position about {1}, roughly {2} min. Each refresh is a KVS read, no call",
+            "when": {
+              "text": "Position about (\\d+), roughly (\\d+) min"
+            },
+            "take": [
+              "a browser"
+            ],
+            "lastStep": 22,
+            "tone": "ok"
+          },
+          {
+            "id": "paused",
+            "milestone": 2,
+            "label": "The queue is paused: you keep your place in line",
+            "when": {
+              "title": "paused"
+            },
+            "take": [
+              "a browser"
+            ],
+            "lastStep": 22,
+            "tone": "warn"
+          },
+          {
+            "id": "starting",
+            "milestone": 0,
+            "label": "The queue is starting: the page tries again in a moment",
+            "when": {
+              "title": "starting"
+            },
+            "take": [
+              "a browser"
+            ],
+            "lastStep": 15,
+            "tone": "warn"
+          },
+          {
+            "id": "busy",
+            "milestone": 1,
+            "label": "Busy: the counter could not be reached, so no ticket yet; the page retries",
+            "when": {
+              "title": "^Busy"
+            },
+            "take": [
+              "a browser"
+            ],
+            "lastStep": 16,
+            "tone": "bad"
+          }
+        ]
+      }
+    },
+    {
+      "label": "What a bot gets"
+    },
+    {
+      "label": "Leave the line (clear my cookies)",
+      "path": "/patterns/edge-waiting-room/leave",
+      "credentials": "same-origin"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "What a bot gets: the viewer-request function answers 503 browsers-only, so no ticket is drawn",
+      "when": {
+        "headers": {
+          "x-wr": "^browsers-only$"
+        }
+      },
+      "tone": "warn",
+      "take": [
+        "a script"
+      ],
+      "stopAfter": "a script"
+    },
+    {
+      "label": "Admitted: the protected origin answered",
+      "when": {
+        "headers": {
+          "x-wr": "^admitted$"
+        }
+      },
+      "tone": "ok",
+      "take": [
+        "a browser"
+      ]
+    },
+    {
+      "label": "Left the line: your place is freed for the next person, and your ticket, pass and WAF token are cleared. Open it in a tab to start over (CAPTCHA first)",
+      "when": {
+        "headers": {
+          "x-wr": "^left$"
+        }
+      },
+      "take": [
+        "leave the line"
+      ],
+      "stopAfter": "leave the line",
+      "tone": "ok"
+    }
+  ],
+  "waf": "Bot Control in count mode gives each browser a token id; a first page load gets one CAPTCHA, and the silent challenge takes over once it expires, so scripts never draw a ticket.",
+  "gist": "A gatekeeper stops scripts; the doorman hands real visitors a numbered ticket and lets them in when their number comes up.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "W": {
+      "name": "Gatekeeper",
+      "icon": "🛡️",
+      "at": "waf"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "K": {
+      "name": "Notebook",
+      "icon": "📒",
+      "at": "kvs",
+      "service": "CloudFront KeyValueStore (shared)",
+      "access": "read by the function; the admission Lambda raises queue-state (UpdateKeys)"
+    },
+    "A": {
+      "name": "Ticket machine",
+      "icon": "🎟️",
+      "at": "origin",
+      "service": "API Gateway REST API with a DynamoDB integration (no Lambda)",
+      "access": "CloudFront adds the x-api-key header"
+    },
+    "D": {
+      "name": "Counter",
+      "icon": "🔢",
+      "at": "backend",
+      "service": "DynamoDB table (ticket counters, 8 shards)",
+      "access": "API Gateway's IAM role runs UpdateItem ADD n 1"
+    },
+    "L": {
+      "name": "Usher",
+      "icon": "🙋",
+      "at": "backend",
+      "lane": "background",
+      "service": "Lambda function (admission, every minute)",
+      "access": "EventBridge schedule; reads the counters, writes KVS"
+    }
+  },
+  "story": [
+    "A script asks for the shop: not a page load.",
+    "The gatekeeper sets no puzzle for that and lets it through.",
+    "The doorman checks his notebook, as for everyone.",
+    "No ticket for a script: come back in a browser. No phone call.",
+    "You ask to leave the line, with your ticket.",
+    "The gatekeeper lets it through: not a page load.",
+    "The doorman checks his notebook and your ticket's signature: still in line?",
+    "Yes: he drops a note to the ticket machine and doesn't wait for an answer.",
+    "The machine crosses your number off: even sent twice, it is crossed off once.",
+    "The doorman tears up your ticket and your pass, and the gatekeeper's too.",
+    "Your browser asks for the shop, without a pass from the gatekeeper.",
+    "The gatekeeper tests your browser: a CAPTCHA the first time, a silent check after that; then the page reloads.",
+    "Back again, now with the gatekeeper's pass.",
+    "The gatekeeper lets you through and tells the doorman your pass number.",
+    "The doorman checks his notebook: which number is being served?",
+    "You have no ticket yet: he asks the ticket machine for one.",
+    "The machine adds one to the counter.",
+    "Your number comes back.",
+    "You get the waiting room, and your ticket as a signed cookie.",
+    "Your browser comes back with your ticket, every few seconds.",
+    "The doorman checks your ticket and his notebook: no phone call.",
+    "Still waiting: here is your place in line.",
+    "Every minute, the usher looks at how many are waiting.",
+    "And moves the 'now serving' number up past five people still waiting, skipping anyone who left.",
+    "Your browser checks back; your number is being served.",
+    "The doorman gives you an entry pass, good for two minutes.",
+    "You come back with the entry pass.",
+    "The doorman lets you into the shop.",
+    "The shop answers."
+  ]
+}

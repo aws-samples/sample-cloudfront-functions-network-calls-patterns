@@ -1,0 +1,108 @@
+{
+  "id": "bot-check-fail-open",
+  "title": "Bot check that fails open",
+  "summary": "The function asks a mock bot-detection vendor and reads a block|tag|off policy from KVS at the same time; if the vendor is slower than the runtime's 1 s timeout or down, the request goes through anyway.",
+  "lesson": "Third-party checks at the edge need a fail-open default: the runtime's fixed 1 s TimeoutError is the only latency limit (Date.now() does not advance across the await, so a self-timed budget never fires), and fetch + KVS is the one combination you may run in parallel.",
+  "tags": [
+    "ai-gateway",
+    "agents"
+  ],
+  "tryPath": "/patterns/bot-check-fail-open/echo",
+  "method": "GET",
+  "expect": "200 JSON echo with x-bot-check: ok, x-bot-verdict human or bot with a score, and x-bot-policy from KVS (default tag). Add header x-mock-delay-ms: 1500 to see x-bot-check: unavailable with a TimeoutError after about 1 s: the request is forwarded anyway (fail open).",
+  "requests": [
+    {
+      "label": "Try it"
+    },
+    {
+      "label": "Slow vendor (1.5 s)",
+      "headers": {
+        "x-mock-delay-ms": "1500"
+      }
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "Bot under a block policy: 403 block page",
+      "when": {
+        "status": 403
+      },
+      "take": [
+        "bot and policy block"
+      ],
+      "tone": "bad",
+      "skip": [
+        "TimeoutError"
+      ]
+    },
+    {
+      "label": "Vendor late or failing: forwarded anyway (fail open)",
+      "when": {
+        "headers": {
+          "x-bot-check": "^unavailable$"
+        }
+      },
+      "take": [
+        "anything else"
+      ],
+      "tone": "warn",
+      "skip": [
+        "{\"verdict\""
+      ]
+    },
+    {
+      "label": "Vendor answered in time; verdict forwarded to the origin",
+      "when": {
+        "headers": {
+          "x-bot-check": "^ok$"
+        }
+      },
+      "take": [
+        "anything else"
+      ],
+      "tone": "ok",
+      "skip": [
+        "TimeoutError"
+      ]
+    }
+  ],
+  "gist": "The doorman asks a robot spotter about you, but never waits more than a second: if it is slow, you get in anyway.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "K": {
+      "name": "Notebook",
+      "icon": "📒",
+      "at": "kvs",
+      "service": "CloudFront KeyValueStore (shared)",
+      "access": "associated with the function; read with cf.kvs()"
+    },
+    "B": {
+      "name": "Robot spotter",
+      "icon": "🕵️",
+      "at": "origin",
+      "service": "Lambda Web Function",
+      "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+    }
+  },
+  "story": [
+    "You knock.",
+    "The doorman rubs out any 'I am human' sticker you brought.",
+    "He asks the robot spotter about you, and waits one second at most.",
+    "Human or robot, with a score.",
+    "At the same time he reads the house rule in his notebook.",
+    "The rule: block robots, tag them, or ignore them.",
+    "A robot, and the rule says block: no entry (403).",
+    "Everyone else goes in, with the verdict on their ticket.",
+    "The app sees the verdict.",
+    "Spotter too slow (over a second) or broken? You go in anyway, marked unchecked."
+  ]
+}

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Guide: serving markdown to AI agents</title>
+  <style>body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; }</style>
+</head>
+<body>
+  <nav><a href="index.html">Home</a> · <a href="guide.html">Guide</a></nav>
+  <main>
+    <h1>Serving markdown to AI agents</h1>
+    <p>Agents read text, not layout. A markdown copy of a page drops the navigation, styles and scripts, so the same
+      content costs the agent far fewer tokens.</p>
+    <h2>How this page becomes markdown</h2>
+    <ol>
+      <li>An agent asks for this page. No markdown exists yet, so it gets the HTML.</li>
+      <li>The CloudFront Function sends the page URI to a queue with <code>cf.beacon</code>.</li>
+      <li>A worker converts the page, stores <code>guide.md</code> and records it in the KeyValueStore.</li>
+      <li>The next agent request is served the markdown.</li>
+    </ol>
+    <h2>Try it</h2>
+    <pre><code>curl -s -H 'Accept: text/markdown' https://&lt;domain&gt;/patterns/markdown-on-demand/guide.html</code></pre>
+    <p>Browsers keep getting this HTML page.</p>
+  </main>
+  <script>document.title += '';</script>
+</body>
+</html>

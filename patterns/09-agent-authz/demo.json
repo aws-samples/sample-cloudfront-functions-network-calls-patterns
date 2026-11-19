@@ -1,0 +1,111 @@
+{
+  "id": "agent-authz",
+  "title": "Per-resource authorization for AI agents",
+  "summary": "An agent sends a scoped token on every request; the function POSTs { action, resource, token } to an authorization service and forwards the request only when it answers allowed: true.",
+  "lesson": "A token says who the agent is, not whether it may act on this resource right now. Ask on every request at the edge: denied calls never reach the backend, and allowed reads can still be cache hits because viewer request runs before the cache.",
+  "tags": [
+    "agents",
+    "auth"
+  ],
+  "tryPath": "/patterns/agent-authz/orders/48291",
+  "method": "GET",
+  "expect": "No Authorization header: 401 {\"error\":\"unauthorized\"}, no call made. Authorization: Bearer demo-agent-token on /orders/48291: 200 order JSON (cacheable); on /orders/70113 or with any write method: 403 {\"error\":\"forbidden\"}. An unreachable authorization service: 503 {\"error\":\"authz_unavailable\"} (fail closed).",
+  "requests": [
+    {
+      "label": "Agent reads its order",
+      "headers": {
+        "authorization": "Bearer demo-agent-token"
+      }
+    },
+    {
+      "label": "Agent reads someone else's order",
+      "path": "/patterns/agent-authz/orders/70113",
+      "headers": {
+        "authorization": "Bearer demo-agent-token"
+      }
+    },
+    {
+      "label": "No token"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "No token: answered 401 at the edge, no call made",
+      "when": {
+        "status": 401
+      },
+      "stopAfter": "no Authorization header",
+      "tone": "bad"
+    },
+    {
+      "label": "Allowed: the order came back (and may be cached)",
+      "when": {
+        "status": 200
+      },
+      "take": [
+        "allowed true"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Not allowed for this resource: 403 from the edge",
+      "when": {
+        "status": 403,
+        "json": {
+          "error": "^forbidden$"
+        }
+      },
+      "take": [
+        "allowed false"
+      ],
+      "tone": "bad"
+    },
+    {
+      "label": "Authorization service unreachable: 503, failing closed",
+      "when": {
+        "status": 503
+      },
+      "take": [
+        "non-2xx"
+      ],
+      "tone": "bad"
+    }
+  ],
+  "gist": "A robot helper wants an order; the doorman asks the permission desk every single time.",
+  "actors": {
+    "V": {
+      "name": "Robot helper",
+      "icon": "🤖",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "C": {
+      "name": "Pickup shelf",
+      "icon": "🗃️",
+      "at": "cache"
+    },
+    "A": {
+      "name": "Permission desk",
+      "icon": "📋",
+      "at": "call",
+      "service": "Lambda Web Function",
+      "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+    }
+  },
+  "story": [
+    "A robot helper asks for an order, holding a pass.",
+    "No pass? Not today (401).",
+    "The doorman asks the desk: may this robot see this order?",
+    "Yes.",
+    "The robot goes to the pickup shelf.",
+    "It gets the order, maybe already waiting on the shelf.",
+    "No.",
+    "Not yours (403); the shop never hears of it.",
+    "The desk did not answer, so no (503)."
+  ],
+  "cachePolicy": "CachingOptimized"
+}

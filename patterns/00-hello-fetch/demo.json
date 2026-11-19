@@ -1,0 +1,61 @@
+{
+  "id": "hello-fetch",
+  "title": "Hello fetch",
+  "summary": "The smallest cf.fetch round trip: the function GETs /hello on its own Lambda Web Function origin and copies one JSON field into a request header.",
+  "lesson": "Proves the wiring contract: behavior, function association, origin id and the secret origin header. If the call fails the request still goes through, with x-hello-error.",
+  "tryPath": "/patterns/hello-fetch/",
+  "method": "GET",
+  "expect": "200 JSON echo with headersFromFunction.x-hello-message = \"hello from the origin\" and x-hello-status = \"200\".",
+  "outcomes": [
+    {
+      "label": "The origin answered the call; its message rides on the forwarded request",
+      "when": {
+        "headers": {
+          "x-hello-message": "."
+        }
+      },
+      "tone": "ok"
+    },
+    {
+      "label": "The call failed; the request went through anyway with x-hello-error",
+      "when": {
+        "headers": {
+          "x-hello-error": "."
+        }
+      },
+      "tone": "warn",
+      "skip": [
+        "{\"message\"",
+        "x-hello-message"
+      ]
+    }
+  ],
+  "gist": "Before letting you in, the doorman phones the shop and writes its greeting on your ticket.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "O": {
+      "name": "Shop",
+      "icon": "🏪",
+      "at": "origin",
+      "service": "Lambda Web Function",
+      "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+    }
+  },
+  "story": [
+    "You knock on the door.",
+    "The doorman phones the shop first.",
+    "The shop says hello.",
+    "The doorman writes the hello on your ticket.",
+    "You walk in with your ticket.",
+    "The shop shows you what was written."
+  ]
+}

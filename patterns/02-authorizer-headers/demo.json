@@ -1,0 +1,155 @@
+{
+  "id": "authorizer-headers",
+  "title": "Custom authorizer with identity headers",
+  "summary": "The function POSTs the viewer context (ip, uri, method, authorization, user-agent) to an authorizer Lambda and copies the returned x-tenant / x-role headers onto the request, or answers 403 itself.",
+  "lesson": "The API Gateway Lambda authorizer 'context' pattern at the edge: viewer-supplied identity headers are stripped, the origin only ever sees values the authorizer granted, and every failure is a deny.",
+  "tags": [
+    "ai-gateway",
+    "auth"
+  ],
+  "tryPath": "/patterns/authorizer-headers/echo",
+  "method": "GET",
+  "expect": "Bearer demo-admin: 200 echo with identity x-tenant acme, x-role admin. demo-viewer is acme viewer, demo-globex is globex admin. A forged x-tenant / x-role is stripped: you still see the identity the authorizer granted. Any other token or none: 403 {\"error\":\"forbidden\"}. An unreachable authorizer: 503 {\"error\":\"authorizer_unavailable\"} (fail closed).",
+  "requests": [
+    {
+      "label": "Bearer demo-admin",
+      "headers": {
+        "authorization": "Bearer demo-admin"
+      }
+    },
+    {
+      "label": "Bearer demo-viewer",
+      "headers": {
+        "authorization": "Bearer demo-viewer"
+      }
+    },
+    {
+      "label": "Bearer demo-globex",
+      "headers": {
+        "authorization": "Bearer demo-globex"
+      }
+    },
+    {
+      "label": "Forged x-tenant header",
+      "headers": {
+        "authorization": "Bearer demo-viewer",
+        "x-tenant": "globex",
+        "x-role": "admin"
+      }
+    },
+    {
+      "label": "Wrong token",
+      "headers": {
+        "authorization": "Bearer nope"
+      }
+    },
+    {
+      "label": "No token"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "Allowed as tenant acme, role admin: the origin saw only the headers the authorizer granted",
+      "when": {
+        "status": 200,
+        "json": {
+          "identity.x-tenant": "^acme$",
+          "identity.x-role": "^admin$"
+        }
+      },
+      "take": [
+        "allow true"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Allowed as tenant acme, role viewer: any forged x-tenant / x-role was stripped",
+      "when": {
+        "status": 200,
+        "json": {
+          "identity.x-tenant": "^acme$",
+          "identity.x-role": "^viewer$"
+        }
+      },
+      "take": [
+        "allow true"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Allowed as tenant globex, role admin: a different identity from a different token",
+      "when": {
+        "status": 200,
+        "json": {
+          "identity.x-tenant": "^globex$",
+          "identity.x-role": "^admin$"
+        }
+      },
+      "take": [
+        "allow true"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Allowed: the origin saw only the headers the authorizer granted",
+      "when": {
+        "status": 200
+      },
+      "take": [
+        "allow true"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Denied by the authorizer: 403 from the edge",
+      "when": {
+        "status": 403
+      },
+      "take": [
+        "allow false"
+      ],
+      "tone": "bad"
+    },
+    {
+      "label": "Authorizer unavailable: 503, failing closed",
+      "when": {
+        "status": 503
+      },
+      "take": [
+        "non-2xx"
+      ],
+      "tone": "bad"
+    }
+  ],
+  "gist": "The doorman asks the manager what you may do, and writes only that on your badge.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "A": {
+      "name": "Manager",
+      "icon": "🧑‍💼",
+      "at": "origin",
+      "service": "Lambda Web Function",
+      "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+    }
+  },
+  "story": [
+    "You knock with a pass.",
+    "The doorman rubs out any badge you made yourself.",
+    "He asks the manager: may this pass come in?",
+    "Yes: company acme, role admin.",
+    "You go in wearing exactly that badge.",
+    "The app sees your badge.",
+    "No.",
+    "The doorman says no (403); the app never hears of you.",
+    "The manager did not answer, so nobody gets in (503)."
+  ]
+}

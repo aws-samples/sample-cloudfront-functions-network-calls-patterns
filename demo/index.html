@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CloudFront Functions network-call patterns</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#stage">Skip to the pattern</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1>CloudFront Functions network-call patterns</h1>
+      <a class="source" href="https://github.com/aws-samples/sample-cloudfront-functions-network-calls-patterns">Source on GitHub</a>
+    </div>
+    <nav class="picker" aria-label="Patterns">
+      <div class="picker-inner">
+        <ol id="strip" class="strip"></ol>
+        <label class="tag-pick"><span class="sr">Filter by tag</span>
+          <select id="tag-filter" hidden></select>
+        </label>
+      </div>
+    </nav>
+  </header>
+
+  <div class="shell">
+    <main id="stage" tabindex="-1">
+      <p class="muted" id="loading">Loading patterns…</p>
+    </main>
+  </div>
+
+  <template id="pattern-template">
+    <section class="pattern">
+      <header class="pattern-head">
+        <h2><span class="num"></span> <span class="title"></span></h2>
+        <p class="facts"><span class="hooks"></span><span class="tags"></span></p>
+      </header>
+      <p class="summary"></p>
+      <details class="more"><summary>Why it matters, and what to expect</summary>
+        <p class="lesson"></p>
+        <p class="expect"></p>
+      </details>
+
+      <div class="send" role="group">
+        <span class="send-label">Send</span>
+        <span class="requests"></span>
+        <a class="open" target="_blank" rel="noopener">open in a tab</a>
+      </div>
+
+      <div class="flow-row">
+        <figure class="flow">
+          <figcaption class="player">
+            <div class="player-top">
+              <p class="outcome" aria-live="polite"></p>
+              <div class="view-switch" role="group" aria-label="How to show the flow">
+                <button type="button" data-view="story" aria-pressed="true">What happens</button>
+                <button type="button" data-view="diagram" aria-pressed="false">Sequence diagram</button>
+                <button type="button" data-view="knowhow" aria-pressed="false">Know-how</button>
+              </div>
+              <button type="button" class="ghost code-toggle" aria-pressed="true">Function code</button>
+            </div>
+            <div class="stepper">
+              <button type="button" class="ghost prev" aria-label="Previous step" disabled>Back</button>
+              <p class="step" aria-live="polite">Send a request to trace its path.</p>
+              <button type="button" class="ghost next" aria-label="Next step" disabled>Next</button>
+              <button type="button" class="ghost replay" disabled>Replay</button>
+              <div class="pace" role="group" aria-label="Animation pace">
+                <button type="button" data-pace="slow" aria-pressed="false">Slow</button>
+                <button type="button" data-pace="normal" aria-pressed="true">Normal</button>
+                <button type="button" data-pace="fast" aria-pressed="false">Fast</button>
+                <button type="button" data-pace="step" aria-pressed="false" title="Wait for Next (or the right arrow key) at every step">Step by step</button>
+              </div>
+            </div>
+          </figcaption>
+          <div class="views">
+            <div class="story-view">
+              <p class="gist"></p>
+              <div class="track-wrap" role="region"><div class="loop"></div></div>
+              <p class="story-note"></p>
+              <ol class="timeline"></ol>
+            </div>
+            <div class="diagram"><div class="diagram-scroll" role="img"></div></div>
+            <div class="knowhow">
+              <section class="kh-part" aria-label="Where your code runs">
+                <h3 class="kh-title">Where your code runs</h3>
+                <ol class="life"></ol>
+              </section>
+              <section class="kh-part" aria-label="How it is built">
+                <h3 class="kh-title">How it's built</h3>
+                <div class="arch-wrap" role="region"><div class="arch"></div></div>
+              </section>
+            </div>
+          </div>
+        </figure>
+        <aside class="code" aria-label="The function code">
+          <!-- The drawer: the handle in the header shuts it, the tab left behind opens it. -->
+          <button type="button" class="code-tab" aria-expanded="false" title="Show the function code"><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg><span class="code-tab-wide">Code</span><span class="code-tab-narrow">The code CloudFront runs</span></button>
+          <div class="code-panel">
+            <header class="code-head">
+              <button type="button" class="ghost code-collapse" aria-expanded="true" aria-label="Hide the function code" title="Hide the function code"><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg></button>
+              <h3>The code CloudFront runs</h3>
+              <div class="code-files" role="group" aria-label="Function file"></div>
+              <span class="code-actions"><a class="code-link" target="_blank" rel="noopener">in the repo</a><button type="button" class="ghost copy">Copy</button></span>
+            </header>
+            <p class="code-note"></p>
+            <div class="code-scroll" role="region" tabindex="0"><pre class="code-body"></pre></div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="exchange" hidden>
+        <section class="panel request" aria-label="Request sent">
+          <header><h3>Request</h3><button type="button" class="ghost copy" disabled>Copy as curl</button></header>
+          <pre class="wire"><span class="placeholder">Nothing sent yet.</span></pre>
+        </section>
+        <section class="panel response" aria-label="Response received">
+          <header><h3>Response</h3><button type="button" class="ghost copy" disabled>Copy</button></header>
+          <div class="wire-wrap"></div>
+        </section>
+      </div>
+
+      <section class="history" aria-label="Recent requests" hidden>
+        <header><h3>Recent requests</h3><span class="history-note">with CloudFront's request ID, for a bug report</span><button type="button" class="ghost copy">Copy all</button></header>
+        <div class="history-scroll"><table>
+          <thead><tr><th scope="col">Time</th><th scope="col">Pattern</th><th scope="col">Request</th><th scope="col">Status</th><th scope="col">Request ID (x-amz-cf-id)</th><th scope="col">Edge</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </section>
+
+      <div class="stage-gap" aria-hidden="true"></div>
+      <nav class="step-patterns" aria-label="Other patterns">
+        <a class="prev-pattern" hidden></a>
+        <a class="next-pattern" hidden></a>
+      </nav>
+    </section>
+  </template>
+</body>
+</html>

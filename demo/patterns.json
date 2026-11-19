@@ -1,0 +1,1847 @@
+[
+  {
+    "number": "00",
+    "folder": "00-hello-fetch",
+    "id": "hello-fetch",
+    "title": "Hello fetch",
+    "summary": "The smallest cf.fetch round trip: the function GETs /hello on its own Lambda Web Function origin and copies one JSON field into a request header.",
+    "lesson": "Proves the wiring contract: behavior, function association, origin id and the secret origin header. If the call fails the request still goes through, with x-hello-error.",
+    "tryPath": "/patterns/hello-fetch/",
+    "method": "GET",
+    "expect": "200 JSON echo with headersFromFunction.x-hello-message = \"hello from the origin\" and x-hello-status = \"200\".",
+    "outcomes": [
+      {
+        "label": "The origin answered the call; its message rides on the forwarded request",
+        "when": {
+          "headers": {
+            "x-hello-message": "."
+          }
+        },
+        "tone": "ok"
+      },
+      {
+        "label": "The call failed; the request went through anyway with x-hello-error",
+        "when": {
+          "headers": {
+            "x-hello-error": "."
+          }
+        },
+        "tone": "warn",
+        "skip": [
+          "{\"message\"",
+          "x-hello-message"
+        ]
+      }
+    ],
+    "gist": "Before letting you in, the doorman phones the shop and writes its greeting on your ticket.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "O": {
+        "name": "Shop",
+        "icon": "🏪",
+        "at": "origin",
+        "service": "Lambda Web Function",
+        "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+      }
+    },
+    "story": [
+      "You knock on the door.",
+      "The doorman phones the shop first.",
+      "The shop says hello.",
+      "The doorman writes the hello on your ticket.",
+      "You walk in with your ticket.",
+      "The shop shows you what was written."
+    ],
+    "hooks": [
+      "viewer-request"
+    ],
+    "tags": [],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as CloudFront Function (viewer-request)\n  participant O as Web Function origin \"hello-fetch\" (IamAuth + OAC)\n  V->>F: GET /patterns/hello-fetch/\n  F->>O: cf.fetch GET /hello\n  O-->>F: {\"message\":\"hello from the origin\"}\n  F->>F: x-hello-message, x-hello-status\n  F->>O: forward the viewer request\n  O-->>V: 200 JSON echo of the x-hello-* headers it received (the function's, plus any other x-hello-* the viewer sent) and x-origin-verify present",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/00-hello-fetch/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/hello-fetch/*.\n// GETs /hello on this pattern's origin and copies one JSON field into a request header.\n// If the call fails, the request still goes through, with the error in x-hello-error.\n\nconst HELLO_ORIGIN_ID = 'hello-fetch';\nconst HELLO_PATH = '/hello';\nconst MESSAGE_HEADER = 'x-hello-message';\nconst STATUS_HEADER = 'x-hello-status';\nconst ERROR_HEADER = 'x-hello-error';\n\nasync function handler(event) {\n  const request = event.request;\n  // Never pass on viewer-supplied copies of the headers this function sets.\n  delete request.headers[MESSAGE_HEADER];\n  delete request.headers[STATUS_HEADER];\n  delete request.headers[ERROR_HEADER];\n  try {\n    const helloResponse = await cf.fetch(HELLO_PATH, {\n      originId: HELLO_ORIGIN_ID,\n      includeBody: true, // default false; needed to read the body\n    });\n    const text = await helloResponse.text(); // assign first: no await inside call arguments\n    const hello = JSON.parse(text);\n    request.headers[MESSAGE_HEADER] = { value: String(hello.message) };\n    request.headers[STATUS_HEADER] = { value: String(helloResponse.status) };\n  } catch (error) {\n    // TypeError, TimeoutError, InternalError, or a body that is not JSON.\n    request.headers[ERROR_HEADER] = { value: error.name + ': ' + error.message };\n  }\n  return request;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "01",
+    "folder": "01-cognito-auth",
+    "id": "cognito-auth",
+    "title": "Cognito token check at the edge",
+    "summary": "A CloudFront Function validates the viewer's Cognito access token with one cf.fetch and forwards the request with x-user-sub, replacing an API Gateway Lambda authorizer.",
+    "lesson": "An AWS service reached without SigV4, and the auth decision made before the origin ever sees the request.",
+    "tags": [
+      "ai-gateway",
+      "auth"
+    ],
+    "tryPath": "/patterns/cognito-auth/whoami",
+    "method": "GET",
+    "expect": "Sign in as the demo user: the page gets a real Cognito access token from GET /patterns/cognito-auth/token (the password stays server-side), then calls whoami with it; the echo origin returns the x-user-sub and x-user-name the function injected. A forged x-user-sub is deleted before the check, so the real sub comes back. Without a token: 401 {\"error\":\"missing_token\"}, no call. A made-up token gets 401 invalid_token; Cognito unreachable gets 503 auth_unavailable (fail closed).",
+    "requests": [
+      {
+        "label": "Sign in as the demo user",
+        "bearerFrom": "/patterns/cognito-auth/token"
+      },
+      {
+        "label": "Forged x-user-sub",
+        "bearerFrom": "/patterns/cognito-auth/token",
+        "headers": {
+          "x-user-sub": "forged"
+        }
+      },
+      {
+        "label": "Made-up token",
+        "headers": {
+          "authorization": "Bearer not-a-real-token"
+        }
+      },
+      {
+        "label": "No token"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "No bearer token: answered 401 at the edge, no call made",
+        "when": {
+          "status": 401,
+          "json": {
+            "error": "^missing_token$"
+          }
+        },
+        "take": [
+          "no bearer token"
+        ],
+        "tone": "bad"
+      },
+      {
+        "label": "Cognito rejected the token: 401 invalid_token",
+        "when": {
+          "status": 401,
+          "json": {
+            "error": "^invalid_token$"
+          }
+        },
+        "take": [
+          "token present",
+          "Cognito non-2xx"
+        ],
+        "tone": "bad"
+      },
+      {
+        "label": "Cognito unreachable: 503, failing closed",
+        "when": {
+          "status": 503
+        },
+        "take": [
+          "token present",
+          "error or timeout"
+        ],
+        "tone": "bad"
+      },
+      {
+        "label": "Cognito accepted the token; the origin saw the identity the function injected",
+        "when": {
+          "status": 200,
+          "json": {
+            "identity.x-user-name": "^demo-user$",
+            "identity.x-user-sub": "^[0-9a-f-]{36}$"
+          }
+        },
+        "take": [
+          "token present",
+          "Cognito 2xx"
+        ],
+        "tone": "ok"
+      }
+    ],
+    "gist": "The doorman checks your ID card with the ID office before you get in.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "C": {
+        "name": "ID office",
+        "icon": "🪪",
+        "at": "call",
+        "service": "Amazon Cognito user pool API (extra HTTPS origin)",
+        "access": "public AWS endpoint; the access token is the credential"
+      },
+      "O": {
+        "name": "Your app",
+        "icon": "🏠",
+        "at": "origin",
+        "service": "Lambda Web Function (IamAuth endpoint)",
+        "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+      }
+    },
+    "story": [
+      "You knock, maybe holding an ID card.",
+      "The doorman rubs out any name you wrote yourself.",
+      "No ID card? Not today (401).",
+      "The doorman asks the ID office: is this card real?",
+      "Yes, and here is who you are.",
+      "The doorman writes your real name on your ticket.",
+      "The app greets you by name.",
+      "A fake card: not today (401).",
+      "The ID office did not answer, so nobody gets in (503)."
+    ],
+    "waf": "One rule on this pattern's path: a per-IP rate limit on the demo token route (/patterns/cognito-auth/token), 10 requests a minute. whoami itself has no rule.",
+    "hooks": [
+      "viewer-request"
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as CloudFront Function (viewer-request)\n  participant C as Cognito user pool endpoint (extra origin \"cognito-auth\")\n  participant O as Echo Lambda Web Function \"cognito-auth-echo\" (IamAuth + OAC)\n  V->>F: GET /patterns/cognito-auth/whoami, Authorization: Bearer token\n  F->>F: delete viewer-supplied x-user-* headers\n  alt no bearer token\n    F-->>V: 401 missing_token (no call)\n  else token present\n    F->>C: cf.fetch POST / (X-Amz-Target GetUser, AccessToken)\n    alt Cognito 2xx\n      C-->>F: UserAttributes (sub, ...)\n      F->>O: forward with x-user-sub, x-user-name\n      O-->>V: 200 echo of the injected identity\n    else Cognito non-2xx\n      F-->>V: 401 invalid_token\n    else error or timeout\n      F-->>V: 503 auth_unavailable, x-cognito-auth-error\n    end\n  end",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/01-cognito-auth/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/cognito-auth/*.\n// Validates the viewer's Cognito access token with one call to Cognito GetUser\n// (no SigV4: the token is the credential), then forwards the request with\n// x-user-sub and x-user-name set. Anything else is denied before the origin:\n//   no Bearer token          -> 401 missing_token, no call\n//   token Cognito rejects    -> 401 invalid_token\n//   Cognito cannot be asked  -> 503 auth_unavailable (fail closed)\n\nconst COGNITO_ORIGIN_ID = 'cognito-auth';\nconst GET_USER_TARGET = 'AWSCognitoIdentityProviderService.GetUser';\nconst BEARER_PREFIX = 'bearer ';\nconst IDENTITY_HEADER_PREFIX = 'x-user-';\nconst USER_SUB_HEADER = 'x-user-sub';\nconst USER_NAME_HEADER = 'x-user-name';\nconst ERROR_HEADER = 'x-cognito-auth-error';\nconst STATUS_TEXT = { 401: 'Unauthorized', 503: 'Service Unavailable' };\n\n// Never trust identity headers coming from the viewer.\nfunction stripIdentityHeaders(headers) {\n  for (const name in headers) {\n    if (name.indexOf(IDENTITY_HEADER_PREFIX) === 0) delete headers[name];\n  }\n}\n\n// The token after \"Bearer \", or null when the viewer sent no Bearer credential at all.\nfunction readBearerToken(headers) {\n  const authorization = headers.authorization ? headers.authorization.value : '';\n  if (authorization.slice(0, BEARER_PREFIX.length).toLowerCase() !== BEARER_PREFIX) return null;\n  return authorization.slice(BEARER_PREFIX.length).trim();\n}\n\n// The one network call. Resolves to the Cognito user, or null for a token Cognito rejects;\n// throws when Cognito cannot be asked.\nasync function getCognitoUser(token) {\n  const cognitoResponse = await cf.fetch('/', {\n    originId: COGNITO_ORIGIN_ID,\n    method: 'POST',\n    headers: {\n      'content-type': 'application/x-amz-json-1.1',\n      'x-amz-target': GET_USER_TARGET,\n    },\n    body: JSON.stringify({ AccessToken: token }),\n    includeBody: true, // default false; the user is in the body\n  });\n  // Cognito answers 400 NotAuthorizedException for a bad or expired token.\n  if (!cognitoResponse.ok) return null;\n  const text = await cognitoResponse.text(); // assign first: no await inside call arguments\n  return JSON.parse(text);\n}\n\n// The value of a Cognito user attribute, '' when the user has none.\nfunction userAttribute(user, name) {\n  const attributes = user.UserAttributes || [];\n  let value = '';\n  for (let i = 0; i < attributes.length; i++) {\n    if (attributes[i].Name === name) value = attributes[i].Value;\n  }\n  return value;\n}\n\nfunction deny(status, code, error) {\n  const headers = {\n    'content-type': { value: 'application/json' },\n    'cache-control': { value: 'no-store' },\n  };\n  if (status === 401) headers['www-authenticate'] = { value: 'Bearer' };\n  if (error) headers[ERROR_HEADER] = { value: error };\n  return {\n    statusCode: status,\n    statusDescription: STATUS_TEXT[status],\n    headers: headers,\n    body: JSON.stringify({ error: code }),\n  };\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  stripIdentityHeaders(headers);\n\n  const token = readBearerToken(headers);\n  if (token === null) return deny(401, 'missing_token');\n\n  let user;\n  try {\n    user = await getCognitoUser(token);\n  } catch (error) {\n    // Fail closed: TypeError, TimeoutError, InternalError, or a body that is not JSON.\n    return deny(503, 'auth_unavailable', error.name + ': ' + error.message);\n  }\n\n  const sub = user ? userAttribute(user, 'sub') : '';\n  if (!sub) return deny(401, 'invalid_token');\n\n  headers[USER_SUB_HEADER] = { value: sub };\n  headers[USER_NAME_HEADER] = { value: String(user.Username) };\n  return request;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "02",
+    "folder": "02-authorizer-headers",
+    "id": "authorizer-headers",
+    "title": "Custom authorizer with identity headers",
+    "summary": "The function POSTs the viewer context (ip, uri, method, authorization, user-agent) to an authorizer Lambda and copies the returned x-tenant / x-role headers onto the request, or answers 403 itself.",
+    "lesson": "The API Gateway Lambda authorizer 'context' pattern at the edge: viewer-supplied identity headers are stripped, the origin only ever sees values the authorizer granted, and every failure is a deny.",
+    "tags": [
+      "ai-gateway",
+      "auth"
+    ],
+    "tryPath": "/patterns/authorizer-headers/echo",
+    "method": "GET",
+    "expect": "Bearer demo-admin: 200 echo with identity x-tenant acme, x-role admin. demo-viewer is acme viewer, demo-globex is globex admin. A forged x-tenant / x-role is stripped: you still see the identity the authorizer granted. Any other token or none: 403 {\"error\":\"forbidden\"}. An unreachable authorizer: 503 {\"error\":\"authorizer_unavailable\"} (fail closed).",
+    "requests": [
+      {
+        "label": "Bearer demo-admin",
+        "headers": {
+          "authorization": "Bearer demo-admin"
+        }
+      },
+      {
+        "label": "Bearer demo-viewer",
+        "headers": {
+          "authorization": "Bearer demo-viewer"
+        }
+      },
+      {
+        "label": "Bearer demo-globex",
+        "headers": {
+          "authorization": "Bearer demo-globex"
+        }
+      },
+      {
+        "label": "Forged x-tenant header",
+        "headers": {
+          "authorization": "Bearer demo-viewer",
+          "x-tenant": "globex",
+          "x-role": "admin"
+        }
+      },
+      {
+        "label": "Wrong token",
+        "headers": {
+          "authorization": "Bearer nope"
+        }
+      },
+      {
+        "label": "No token"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "Allowed as tenant acme, role admin: the origin saw only the headers the authorizer granted",
+        "when": {
+          "status": 200,
+          "json": {
+            "identity.x-tenant": "^acme$",
+            "identity.x-role": "^admin$"
+          }
+        },
+        "take": [
+          "allow true"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Allowed as tenant acme, role viewer: any forged x-tenant / x-role was stripped",
+        "when": {
+          "status": 200,
+          "json": {
+            "identity.x-tenant": "^acme$",
+            "identity.x-role": "^viewer$"
+          }
+        },
+        "take": [
+          "allow true"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Allowed as tenant globex, role admin: a different identity from a different token",
+        "when": {
+          "status": 200,
+          "json": {
+            "identity.x-tenant": "^globex$",
+            "identity.x-role": "^admin$"
+          }
+        },
+        "take": [
+          "allow true"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Allowed: the origin saw only the headers the authorizer granted",
+        "when": {
+          "status": 200
+        },
+        "take": [
+          "allow true"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Denied by the authorizer: 403 from the edge",
+        "when": {
+          "status": 403
+        },
+        "take": [
+          "allow false"
+        ],
+        "tone": "bad"
+      },
+      {
+        "label": "Authorizer unavailable: 503, failing closed",
+        "when": {
+          "status": 503
+        },
+        "take": [
+          "non-2xx"
+        ],
+        "tone": "bad"
+      }
+    ],
+    "gist": "The doorman asks the manager what you may do, and writes only that on your badge.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "A": {
+        "name": "Manager",
+        "icon": "🧑‍💼",
+        "at": "origin",
+        "service": "Lambda Web Function",
+        "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+      }
+    },
+    "story": [
+      "You knock with a pass.",
+      "The doorman rubs out any badge you made yourself.",
+      "He asks the manager: may this pass come in?",
+      "Yes: company acme, role admin.",
+      "You go in wearing exactly that badge.",
+      "The app sees your badge.",
+      "No.",
+      "The doorman says no (403); the app never hears of you.",
+      "The manager did not answer, so nobody gets in (503)."
+    ],
+    "hooks": [
+      "viewer-request"
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as CloudFront Function (viewer-request)\n  participant A as Lambda Web Function \"authorizer-headers\" (IamAuth + OAC)\n  V->>F: GET /patterns/authorizer-headers/echo, Authorization: Bearer demo-admin\n  F->>F: delete viewer-supplied x-tenant, x-role\n  F->>A: cf.fetch POST /authorize {ip, uri, method, headers}\n  alt allow true\n    A-->>F: {\"allow\":true,\"headers\":{\"x-tenant\":\"acme\",\"x-role\":\"admin\"}}\n    F->>A: forward with x-tenant, x-role (echo route)\n    A-->>V: 200 echo of the identity headers\n  else allow false\n    A-->>F: {\"allow\":false,\"headers\":{}}\n    F-->>V: 403 forbidden\n  else non-2xx, bad JSON, error or timeout\n    F-->>V: 503 authorizer_unavailable, x-authorizer-headers-error\n  end",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/02-authorizer-headers/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/authorizer-headers/*.\n// The API Gateway \"Lambda authorizer + context\" pattern at the edge: one call POSTs the\n// viewer context to /authorize, the authorizer answers { allow, headers }, and the\n// function copies those identity headers onto the request (allow) or answers 403 (deny).\n// An authorizer that cannot be asked fails closed with 503.\n\nconst AUTHORIZER_ORIGIN_ID = 'authorizer-headers';\nconst AUTHORIZE_PATH = '/authorize';\n// The only headers the authorizer may set. Viewers can never supply them.\nconst IDENTITY_HEADERS = ['x-tenant', 'x-role'];\nconst ERROR_HEADER = 'x-authorizer-headers-error';\nconst STATUS_TEXT = { 403: 'Forbidden', 503: 'Service Unavailable' };\n\nfunction headerValue(headers, name) {\n  return headers[name] ? headers[name].value : '';\n}\n\n// Never trust identity headers coming from the viewer.\nfunction stripIdentityHeaders(headers) {\n  for (let i = 0; i < IDENTITY_HEADERS.length; i++) delete headers[IDENTITY_HEADERS[i]];\n}\n\n// What the authorizer decides on: who is asking, for what.\nfunction viewerContext(event) {\n  const request = event.request;\n  return {\n    ip: event.viewer.ip,\n    uri: request.uri,\n    method: request.method,\n    headers: {\n      authorization: headerValue(request.headers, 'authorization'),\n      'user-agent': headerValue(request.headers, 'user-agent'),\n    },\n  };\n}\n\n// The one network call. Resolves to { ok, status, decision }; throws when the authorizer\n// cannot be asked or its answer is not JSON.\nasync function askAuthorizer(context) {\n  const body = JSON.stringify(context);\n  const authorizerResponse = await cf.fetch(AUTHORIZE_PATH, {\n    originId: AUTHORIZER_ORIGIN_ID,\n    method: 'POST',\n    headers: { 'content-type': 'application/json' },\n    body: body,\n    includeBody: true, // default false; the decision is in the body\n  });\n  if (!authorizerResponse.ok) return { ok: false, status: authorizerResponse.status };\n  const text = await authorizerResponse.text(); // assign first: no await inside call arguments\n  return { ok: true, status: authorizerResponse.status, decision: JSON.parse(text) };\n}\n\n// Copy only the allowlisted identity headers, lowercased.\nfunction grantIdentityHeaders(headers, granted) {\n  for (const name in granted) {\n    const lowerName = name.toLowerCase();\n    if (IDENTITY_HEADERS.indexOf(lowerName) !== -1) headers[lowerName] = { value: String(granted[name]) };\n  }\n}\n\nfunction deny(status, code, error) {\n  const headers = {\n    'content-type': { value: 'application/json' },\n    'cache-control': { value: 'no-store' },\n  };\n  if (error) headers[ERROR_HEADER] = { value: error };\n  return {\n    statusCode: status,\n    statusDescription: STATUS_TEXT[status],\n    headers: headers,\n    body: JSON.stringify({ error: code }),\n  };\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  stripIdentityHeaders(headers);\n\n  let answer;\n  try {\n    answer = await askAuthorizer(viewerContext(event));\n  } catch (error) {\n    // Fail closed: TypeError, TimeoutError, InternalError, or a body that is not JSON.\n    return deny(503, 'authorizer_unavailable', error.name + ': ' + error.message);\n  }\n  if (!answer.ok) return deny(503, 'authorizer_unavailable', 'authorizer returned ' + answer.status);\n\n  const decision = answer.decision;\n  if (!decision || decision.allow !== true) return deny(403, 'forbidden');\n\n  grantIdentityHeaders(headers, decision.headers || {});\n  return request;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "03",
+    "folder": "03-bot-check-fail-open",
+    "id": "bot-check-fail-open",
+    "title": "Bot check that fails open",
+    "summary": "The function asks a mock bot-detection vendor and reads a block|tag|off policy from KVS at the same time; if the vendor is slower than the runtime's 1 s timeout or down, the request goes through anyway.",
+    "lesson": "Third-party checks at the edge need a fail-open default: the runtime's fixed 1 s TimeoutError is the only latency limit (Date.now() does not advance across the await, so a self-timed budget never fires), and fetch + KVS is the one combination you may run in parallel.",
+    "tags": [
+      "ai-gateway",
+      "agents"
+    ],
+    "tryPath": "/patterns/bot-check-fail-open/echo",
+    "method": "GET",
+    "expect": "200 JSON echo with x-bot-check: ok, x-bot-verdict human or bot with a score, and x-bot-policy from KVS (default tag). Add header x-mock-delay-ms: 1500 to see x-bot-check: unavailable with a TimeoutError after about 1 s: the request is forwarded anyway (fail open).",
+    "requests": [
+      {
+        "label": "Try it"
+      },
+      {
+        "label": "Slow vendor (1.5 s)",
+        "headers": {
+          "x-mock-delay-ms": "1500"
+        }
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "Bot under a block policy: 403 block page",
+        "when": {
+          "status": 403
+        },
+        "take": [
+          "bot and policy block"
+        ],
+        "tone": "bad",
+        "skip": [
+          "TimeoutError"
+        ]
+      },
+      {
+        "label": "Vendor late or failing: forwarded anyway (fail open)",
+        "when": {
+          "headers": {
+            "x-bot-check": "^unavailable$"
+          }
+        },
+        "take": [
+          "anything else"
+        ],
+        "tone": "warn",
+        "skip": [
+          "{\"verdict\""
+        ]
+      },
+      {
+        "label": "Vendor answered in time; verdict forwarded to the origin",
+        "when": {
+          "headers": {
+            "x-bot-check": "^ok$"
+          }
+        },
+        "take": [
+          "anything else"
+        ],
+        "tone": "ok",
+        "skip": [
+          "TimeoutError"
+        ]
+      }
+    ],
+    "gist": "The doorman asks a robot spotter about you, but never waits more than a second: if it is slow, you get in anyway.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "K": {
+        "name": "Notebook",
+        "icon": "📒",
+        "at": "kvs",
+        "service": "CloudFront KeyValueStore (shared)",
+        "access": "associated with the function; read with cf.kvs()"
+      },
+      "B": {
+        "name": "Robot spotter",
+        "icon": "🕵️",
+        "at": "origin",
+        "service": "Lambda Web Function",
+        "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+      }
+    },
+    "story": [
+      "You knock.",
+      "The doorman rubs out any 'I am human' sticker you brought.",
+      "He asks the robot spotter about you, and waits one second at most.",
+      "Human or robot, with a score.",
+      "At the same time he reads the house rule in his notebook.",
+      "The rule: block robots, tag them, or ignore them.",
+      "A robot, and the rule says block: no entry (403).",
+      "Everyone else goes in, with the verdict on their ticket.",
+      "The app sees the verdict.",
+      "Spotter too slow (over a second) or broken? You go in anyway, marked unchecked."
+    ],
+    "hooks": [
+      "viewer-request"
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as CloudFront Function (viewer-request)\n  participant K as KVS\n  participant B as Mock vendor Web Function \"bot-check-fail-open\" (IamAuth + OAC)\n  V->>F: GET /patterns/bot-check-fail-open/echo\n  F->>F: delete viewer-supplied x-bot-* headers\n  par Promise.allSettled\n    F->>B: cf.fetch POST /check {path, ip, user-agent, accept-language}\n    B-->>F: {\"verdict\":\"human\" or \"bot\",\"score\":N}\n  and\n    F->>K: get(\"bot-policy\")\n    K-->>F: block, tag or off (default tag)\n  end\n  alt bot and policy block\n    F-->>V: 403 block page\n  else anything else\n    F->>B: forward with x-bot-check, x-bot-verdict, x-bot-score, x-bot-policy\n    B-->>V: 200 echo of the x-bot-* headers\n  end\n  Note over F: TimeoutError (over 1 s), error or non-200 means x-bot-check: unavailable, forward",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/03-bot-check-fail-open/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/bot-check-fail-open/*.\n// Two lookups run in parallel:\n//   1. One call: POST /check on the mock vendor. The only latency limit is the\n//      runtime's fixed 1 s timeout (no option, and Date.now() does not advance\n//      across the await, so a tighter budget cannot be timed here).\n//   2. kvs.get('bot-policy'): block | tag | off. Missing KVS or key -> tag.\n// Vendor slow or broken -> forward with x-bot-check: unavailable (fail open).\n// Verdict bot + block   -> 403 block page.\n// Verdict bot + tag     -> forward with x-bot-verdict: bot, the origin decides.\n// Policy off            -> forward, verdict ignored.\n\nconst VENDOR_ORIGIN_ID = 'bot-check-fail-open';\nconst CHECK_PATH = '/check';\nconst BOT_POLICY_KEY = 'bot-policy';\nconst POLICIES = ['block', 'tag', 'off'];\nconst DEFAULT_POLICY = 'tag';\nconst BOT_HEADER_PREFIX = 'x-bot-';\nconst POLICY_HEADER = 'x-bot-policy';\nconst POLICY_SOURCE_HEADER = 'x-bot-policy-source';\nconst CHECK_HEADER = 'x-bot-check';\nconst VERDICT_HEADER = 'x-bot-verdict';\nconst SCORE_HEADER = 'x-bot-score';\nconst ERROR_HEADER = 'x-bot-check-fail-open-error';\n\nfunction headerValue(request, name) {\n  return request.headers[name] ? request.headers[name].value : '';\n}\n\nfunction describeError(error) {\n  return error.name + ': ' + error.message;\n}\n\n// Never trust verdict headers coming from the viewer.\nfunction stripBotHeaders(headers) {\n  for (const name in headers) {\n    if (name.indexOf(BOT_HEADER_PREFIX) === 0) delete headers[name];\n  }\n}\n\n// The one network call. Resolves to { verdict, score } or throws.\nasync function askVendor(request, viewer) {\n  const body = JSON.stringify({\n    path: request.uri,\n    ip: viewer.ip,\n    userAgent: headerValue(request, 'user-agent'),\n    acceptLanguage: headerValue(request, 'accept-language'),\n    // Demo knobs, passed through so curl can steer the mock.\n    forceVerdict: headerValue(request, 'x-force-verdict'),\n    delayMs: headerValue(request, 'x-mock-delay-ms'),\n  });\n  const vendorResponse = await cf.fetch(CHECK_PATH, {\n    originId: VENDOR_ORIGIN_ID,\n    method: 'POST',\n    headers: { // plain strings, not { value } objects\n      'content-type': 'application/json',\n    },\n    body: body,\n    includeBody: true, // default false; the verdict is in the body\n  });\n  if (!vendorResponse.ok) throw new Error('vendor returned ' + vendorResponse.status);\n\n  const text = await vendorResponse.text(); // assign first: no await inside call arguments\n  const answer = JSON.parse(text);\n  if (answer.verdict !== 'bot' && answer.verdict !== 'human') throw new Error('vendor verdict unreadable');\n  return { verdict: answer.verdict, score: Number(answer.score) || 0 };\n}\n\n// Rejects when no KVS is associated, the key is missing or the value is unknown.\nasync function readPolicy() {\n  const value = await cf.kvs().get(BOT_POLICY_KEY);\n  const policy = String(value).trim().toLowerCase();\n  if (POLICIES.indexOf(policy) === -1) throw new Error(BOT_POLICY_KEY + ' \"' + policy + '\" is not block|tag|off');\n  return policy;\n}\n\nfunction blockPage(check) {\n  return {\n    statusCode: 403,\n    statusDescription: 'Forbidden',\n    headers: {\n      'content-type': { value: 'text/html; charset=utf-8' },\n      'cache-control': { value: 'no-store' },\n      [VERDICT_HEADER]: { value: 'bot' },\n      [SCORE_HEADER]: { value: String(check.score) },\n    },\n    body: '<!doctype html><title>Blocked</title><h1>403 Blocked</h1>' +\n      '<p>The bot check said bot (score ' + check.score + ') and the KVS key ' + BOT_POLICY_KEY + ' is block.</p>',\n  };\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  stripBotHeaders(headers);\n\n  // allSettled, not all: a missing KVS key must not throw away the vendor verdict.\n  const results = await Promise.allSettled([askVendor(request, event.viewer), readPolicy()]);\n  const vendorResult = results[0];\n  const policyResult = results[1];\n\n  const fromKvs = policyResult.status === 'fulfilled';\n  const policy = fromKvs ? policyResult.value : DEFAULT_POLICY;\n  headers[POLICY_HEADER] = { value: policy };\n  headers[POLICY_SOURCE_HEADER] = { value: fromKvs ? 'kvs' : 'default: ' + describeError(policyResult.reason) };\n\n  if (vendorResult.status === 'rejected') {\n    // Fail open: TypeError, TimeoutError, InternalError, a bad status or an unreadable verdict.\n    headers[CHECK_HEADER] = { value: 'unavailable' };\n    headers[ERROR_HEADER] = { value: describeError(vendorResult.reason) };\n    return request;\n  }\n\n  const check = vendorResult.value;\n  headers[CHECK_HEADER] = { value: 'ok' };\n  if (policy === 'off') return request;\n\n  headers[VERDICT_HEADER] = { value: check.verdict };\n  headers[SCORE_HEADER] = { value: String(check.score) };\n  if (check.verdict === 'bot' && policy === 'block') return blockPage(check);\n  return request;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "04",
+    "folder": "04-ab-global-table",
+    "id": "ab-global-table",
+    "title": "Sticky A/B variant, KVS warm set over a DynamoDB global table",
+    "summary": "The function reads the user's variant from KVS and only calls the origin on a miss; the origin assigns it once in DynamoDB and fills KVS lazily.",
+    "lesson": "Fetch only on a miss: pay the extra execution once per key, then serve from the edge until TTL evicts it.",
+    "tags": [
+      "ai-gateway",
+      "routing"
+    ],
+    "hooks": [
+      "viewer-request",
+      "viewer-response"
+    ],
+    "tryPath": "/patterns/ab-global-table/",
+    "method": "GET",
+    "expect": "JSON echo with x-ab-variant and x-ab-source; the response carries x-ab-hooks: request+response and Set-Cookie uid=<16 hex> (first visit), set by the viewer-response function, not the origin. x-ab-variant is A or B, x-ab-source origin on a first visit (one call) and kvs on a return visit (no call), plus Set-Cookie ab=<variant>. Any failure falls back to x-ab-variant control, x-ab-source fallback and x-ab-error, with no ab cookie.",
+    "requests": [
+      {
+        "label": "Visit (keeps my cookies)",
+        "credentials": "same-origin"
+      },
+      {
+        "label": "Visit as a stranger (no cookies)"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "KVS hit: variant served from the edge, no call",
+        "when": {
+          "headers": {
+            "x-ab-source": "^kvs$"
+          }
+        },
+        "take": [
+          "KVS hit"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "KVS miss: one call assigned the variant",
+        "when": {
+          "headers": {
+            "x-ab-source": "^origin$"
+          }
+        },
+        "take": [
+          "miss"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Lookup failed: control variant, no ab cookie",
+        "when": {
+          "headers": {
+            "x-ab-source": "^fallback$"
+          }
+        },
+        "take": [
+          "any failure"
+        ],
+        "tone": "warn"
+      }
+    ],
+    "gist": "The doorman looks up which room you got last time; only new guests get a room picked, once.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "K": {
+        "name": "Notebook",
+        "icon": "📒",
+        "at": "kvs",
+        "service": "CloudFront KeyValueStore (shared)",
+        "access": "read by the function; written by the loader and evictor (UpdateKeys)"
+      },
+      "L": {
+        "name": "Host",
+        "icon": "🎲",
+        "at": "origin",
+        "service": "Lambda Web Function",
+        "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+      },
+      "D": {
+        "name": "Big ledger",
+        "icon": "📚",
+        "at": "backend",
+        "service": "DynamoDB global table",
+        "access": "the loader's IAM role; its stream feeds an evictor Lambda"
+      },
+      "R": {
+        "name": "Exit greeter",
+        "icon": "👋",
+        "at": "viewer-response"
+      }
+    },
+    "story": [
+      "You arrive, maybe with your wristband.",
+      "No wristband? The doorman makes you a new one.",
+      "He looks you up in his notebook.",
+      "Found: same room as last time, no phone call.",
+      "Not found: he asks the host to pick a room.",
+      "The host writes your room in the big ledger, once.",
+      "And copies it into the doorman's notebook for next time.",
+      "Room A or room B.",
+      "Something broke: you get the normal room.",
+      "You walk to your room.",
+      "The room answers.",
+      "On the way out, the greeter puts your wristbands on.",
+      "You get your page.",
+      "When the ledger changes, the notebook changes too."
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as viewer-request function\n  participant K as KVS\n  participant L as Loader Web Function (IamAuth + OAC)\n  participant D as DynamoDB global table\n  participant R as viewer-response function\n  V->>F: GET /patterns/ab-global-table/ (cookie uid, or none)\n  F->>F: drop viewer x-ab-set-*, mint a uid if missing\n  F->>K: get(uid)\n  alt KVS hit\n    K-->>F: A or B (x-ab-source: kvs, no call)\n  else miss\n    F->>L: cf.fetch POST /assign/uid\n    L->>D: conditional PutItem (or read the existing item)\n    L->>K: UpdateKeys put uid\n    L-->>F: {\"variant\":\"A\" or \"B\"} (x-ab-source: origin)\n  else any failure\n    F->>F: x-ab-variant: control, x-ab-source: fallback, x-ab-error\n  end\n  F->>L: forward with x-ab-variant, x-ab-set-uid, x-ab-set-variant\n  L-->>R: 200 JSON echo\n  R->>R: Set-Cookie uid (new uid), Set-Cookie ab (A or B only), x-ab-hooks\n  R-->>V: response\n  Note over D,K: TTL expiry or an edit streams to the evictor Lambda, which deletes or rewrites the KVS key",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/04-ab-global-table/function.js",
+        "source": "import cf from 'cloudfront';\nimport crypto from 'crypto';\n\n// Viewer-request function on /patterns/ab-global-table/*.\n// Sticky A/B: the uid cookie names the user, the KVS holds the warm working set,\n// DynamoDB (global table) behind the origin is the source of truth.\n//   KVS hit  -> x-ab-variant from KVS, no network call\n//   KVS miss -> one call: POST /assign/<uid> on this pattern's origin\n//   failure  -> x-ab-variant: control and x-ab-error, request still forwarded\n// This side never sets a cookie: response-function.js turns x-ab-set-uid and\n// x-ab-set-variant into Set-Cookie.\n\nconst ASSIGNER_ORIGIN_ID = 'ab-global-table';\nconst ASSIGN_PATH = '/assign/';\nconst UID_COOKIE = 'uid';\nconst UID_PATTERN = /^[a-f0-9]{16}$/;\nconst UID_LENGTH = 16;\nconst FALLBACK_VARIANT = 'control';\n// Read by response-function.js: only this function may set them.\nconst SET_UID_HEADER = 'x-ab-set-uid';\nconst SET_VARIANT_HEADER = 'x-ab-set-variant';\n// Forwarded to the origin.\nconst UID_HEADER = 'x-ab-uid';\nconst NEW_UID_HEADER = 'x-ab-uid-new';\nconst KVS_HEADER = 'x-ab-kvs';\nconst VARIANT_HEADER = 'x-ab-variant';\nconst SOURCE_HEADER = 'x-ab-source';\nconst ERROR_HEADER = 'x-ab-error';\n\nfunction isVariant(value) {\n  return value === 'A' || value === 'B';\n}\n\n// Unique enough per browser. Not Math.random(): a function cannot make a network call\n// after generating random values, so it hashes the request id instead.\nfunction newUid(event) {\n  const seed = event.context.requestId + event.viewer.ip + Date.now();\n  return crypto.createHash('sha256').update(seed).digest('hex').slice(0, UID_LENGTH);\n}\n\n// The viewer's uid cookie, or a new uid that the response side will set as a cookie.\nfunction readOrIssueUid(event) {\n  const request = event.request;\n  const cookie = request.cookies[UID_COOKIE];\n  const uid = cookie ? cookie.value : '';\n  if (UID_PATTERN.test(uid)) return uid;\n\n  const issued = newUid(event);\n  request.cookies[UID_COOKIE] = { value: issued };\n  request.headers[NEW_UID_HEADER] = { value: '1' };\n  request.headers[SET_UID_HEADER] = { value: issued };\n  return issued;\n}\n\n// The one network call, on a KVS miss. Resolves to A or B, or throws.\nasync function assignVariant(uid) {\n  const assignResponse = await cf.fetch(ASSIGN_PATH + uid, {\n    originId: ASSIGNER_ORIGIN_ID,\n    method: 'POST',\n    includeBody: true, // default false; the variant is in the body\n  });\n  const text = await assignResponse.text(); // assign first: no await inside call arguments\n  const assignment = JSON.parse(text);\n  if (!isVariant(assignment.variant)) throw new Error('bad assign response, status ' + assignResponse.status);\n  return assignment.variant;\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  // Only this function may talk to the response side: drop viewer-supplied copies.\n  delete headers[SET_UID_HEADER];\n  delete headers[SET_VARIANT_HEADER];\n\n  const uid = readOrIssueUid(event);\n  headers[UID_HEADER] = { value: uid };\n\n  // 1. KVS. A missing key, or no KVS associated, throws: that is a miss.\n  let variant = '';\n  let source = 'kvs';\n  try {\n    variant = await cf.kvs().get(uid);\n    headers[KVS_HEADER] = { value: 'hit' };\n  } catch (error) {\n    headers[KVS_HEADER] = { value: 'miss: ' + error.message };\n  }\n\n  // 2. Miss: one call to the assigner.\n  if (!isVariant(variant)) {\n    try {\n      variant = await assignVariant(uid);\n      source = 'origin';\n    } catch (error) {\n      // TypeError, TimeoutError, InternalError, or a bad body: forward as control.\n      variant = FALLBACK_VARIANT;\n      source = 'fallback';\n      headers[ERROR_HEADER] = { value: error.name + ': ' + error.message };\n    }\n  }\n\n  headers[VARIANT_HEADER] = { value: variant };\n  headers[SOURCE_HEADER] = { value: source };\n  if (variant !== FALLBACK_VARIANT) headers[SET_VARIANT_HEADER] = { value: variant };\n  return request;\n}\n"
+      },
+      {
+        "hook": "viewer-response",
+        "file": "response-function.js",
+        "path": "patterns/04-ab-global-table/response-function.js",
+        "source": "// Viewer-response function on /patterns/ab-global-table/*.\n// The request function decided (KVS first, ONE cf.fetch on a miss) and left the\n// decision on the request as x-ab-set-uid / x-ab-set-variant. This side only\n// turns those into cookies. No cf.fetch, no KVS: this hook runs on cache hits\n// too, so it must stay cheap.\n\nconst SET_UID_HEADER = 'x-ab-set-uid';\nconst SET_VARIANT_HEADER = 'x-ab-set-variant';\nconst HOOKS_HEADER = 'x-ab-hooks';\nconst UID_COOKIE = 'uid';\nconst VARIANT_COOKIE = 'ab';\nconst UID_PATTERN = /^[a-f0-9]{16}$/;\nconst COOKIE_ATTRIBUTES = 'Path=/patterns/ab-global-table/; Max-Age=86400; Secure; HttpOnly; SameSite=Lax';\n\nfunction headerValue(headers, name) {\n  return headers[name] ? headers[name].value : '';\n}\n\nfunction handler(event) {\n  const requestHeaders = event.request.headers;\n  const response = event.response;\n  const uid = headerValue(requestHeaders, SET_UID_HEADER);\n  const variant = headerValue(requestHeaders, SET_VARIANT_HEADER);\n\n  if (UID_PATTERN.test(uid)) response.cookies[UID_COOKIE] = { value: uid, attributes: COOKIE_ATTRIBUTES };\n  if (variant === 'A' || variant === 'B') {\n    response.cookies[VARIANT_COOKIE] = { value: variant, attributes: COOKIE_ATTRIBUTES };\n  }\n  response.headers[HOOKS_HEADER] = { value: 'request+response' };\n  return response;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "05",
+    "folder": "05-edge-signal-sqs",
+    "id": "edge-signal-sqs",
+    "title": "Edge signal to SQS, no Lambda",
+    "summary": "The request function fires one small JSON event with cf.beacon into an SQS FIFO queue through an API Gateway service integration; the response function beacons a second 'served' event only on demand (x-signal-sample: 1). Its 5xx condition never fires: CloudFront does not run viewer-response when the origin answers 400 or more.",
+    "lesson": "API Gateway is the signing proxy for SigV4-only services; cf.beacon makes the signal fire-and-forget (still the one call per invocation, available wherever cf.fetch is); and a response-side call runs on cache hits too, so it must be rare by construction.",
+    "tags": [
+      "ai-gateway",
+      "telemetry"
+    ],
+    "hooks": [
+      "viewer-request",
+      "viewer-response"
+    ],
+    "tryPath": "/patterns/edge-signal-sqs/hello",
+    "method": "GET",
+    "expect": "JSON echo with headersFromFunction.x-signal = \"beacon\" and x-signal-served: skipped on the response; one requested event in the queue. Send x-signal-sample: 1 for x-signal-served: beacon and a second queue message. /boom returns 503 with NO x-signal-served header: CloudFront skips viewer-response on origin 4xx/5xx.",
+    "requests": [
+      {
+        "label": "Try it"
+      },
+      {
+        "label": "Sample the response (x-signal-sample: 1)",
+        "headers": {
+          "x-signal-sample": "1"
+        }
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "One beacon: the response function skipped its call",
+        "when": {
+          "headers": {
+            "x-signal-served": "^skipped$"
+          }
+        },
+        "take": [
+          "otherwise"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Two beacons: requested and served",
+        "when": {
+          "headers": {
+            "x-signal-served": "^beacon$"
+          }
+        },
+        "take": [
+          "status 5xx"
+        ],
+        "tone": "ok"
+      }
+    ],
+    "gist": "The doorman drops a note in the mailbox as you pass, without slowing you down.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "A": {
+        "name": "Mail clerk",
+        "icon": "📮",
+        "at": "origin",
+        "service": "API Gateway REST API with an SQS integration",
+        "access": "CloudFront adds the x-api-key header"
+      },
+      "Q": {
+        "name": "Mailbox",
+        "icon": "📬",
+        "at": "backend",
+        "service": "Amazon SQS FIFO queue",
+        "access": "API Gateway's IAM role sends the message"
+      },
+      "R": {
+        "name": "Exit greeter",
+        "icon": "👋",
+        "at": "viewer-response"
+      }
+    },
+    "story": [
+      "You walk in.",
+      "The doorman drops a 'someone came' note in the mail slot.",
+      "The clerk puts it in the mailbox.",
+      "Nobody waits for the note; you keep walking.",
+      "You reach the room.",
+      "The room answers.",
+      "Asked for a sample, the exit greeter drops a 'they left' note too.",
+      "That note lands in the mailbox as well.",
+      "Most times the greeter sends nothing.",
+      "You get your page."
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as viewer-request function\n  participant A as API Gateway REST API (x-api-key)\n  participant Q as SQS FIFO queue\n  participant R as viewer-response function\n  V->>F: GET /patterns/edge-signal-sqs/hello\n  F-)A: cf.beacon POST /patterns/signal {kind: requested, uri, ip hash, ua, ts}\n  A-)Q: SendMessage (dedup id = uri)\n  Note over F: x-signal: beacon (handed off, nothing awaited)\n  F->>A: forward with x-signal-id\n  A-->>R: 200 echo of the x-signal* headers\n  alt status 5xx or request header x-signal-sample: 1\n    R-)A: cf.beacon POST /patterns/signal {kind: served, status, signalId}\n    A-)Q: SendMessage (dedup id = served:uri:status)\n  else\n    R->>R: x-signal-served: skipped (no call)\n  end\n  R-->>V: response",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/05-edge-signal-sqs/function.js",
+        "source": "import cf from 'cloudfront';\nimport crypto from 'crypto';\n\n// Viewer-request function on /patterns/edge-signal-sqs/*.\n// Fires a small JSON signal at this pattern's origin (API Gateway -> SQS FIFO, no Lambda)\n// with cf.beacon, then forwards the request whatever happened.\n//   x-signal: beacon -> handed off; nothing to await, no response to read\n//   x-signal: failed -> cf.beacon threw (x-signal-error)\n// cf.beacon still counts as the one network call per invocation.\n\nconst QUEUE_ORIGIN_ID = 'edge-signal-sqs';\nconst SIGNAL_PATH = '/patterns/signal';\nconst MAX_DEDUP_ID_LENGTH = 128; // SQS FIFO limit\nconst MAX_USER_AGENT_LENGTH = 200;\nconst VIEWER_HASH_LENGTH = 16;\nconst SIGNAL_ID_HEADER = 'x-signal-id';\nconst SIGNAL_HEADER = 'x-signal';\nconst ERROR_HEADER = 'x-signal-error';\n\n// Never ship the raw viewer IP: a truncated hash is enough to tell viewers apart.\nfunction hashViewerIp(ip) {\n  return crypto.createHash('sha256').update(ip).digest('hex').slice(0, VIEWER_HASH_LENGTH);\n}\n\nfunction requestedSignal(event, signalId) {\n  const userAgent = event.request.headers['user-agent'] ? event.request.headers['user-agent'].value : '';\n  return {\n    kind: 'requested',\n    uri: signalId,\n    ip: hashViewerIp(event.viewer.ip),\n    ua: userAgent.slice(0, MAX_USER_AGENT_LENGTH),\n    ts: Date.now(),\n  };\n}\n\nasync function handler(event) {\n  const request = event.request;\n\n  // FIFO dedup id (the API Gateway mapping uses it).\n  const signalId = request.uri.slice(0, MAX_DEDUP_ID_LENGTH);\n  // Carried forward so response-function.js can correlate its \"served\" event.\n  request.headers[SIGNAL_ID_HEADER] = { value: signalId };\n\n  try {\n    cf.beacon(SIGNAL_PATH, {\n      originId: QUEUE_ORIGIN_ID,\n      method: 'POST',\n      headers: { 'content-type': 'application/json' }, // plain strings, not { value } objects\n      body: JSON.stringify(requestedSignal(event, signalId)),\n      logDeliveryErrors: true, // a delivery failure after the function returned goes to CloudWatch Logs\n    });\n    request.headers[SIGNAL_HEADER] = { value: 'beacon' };\n  } catch (error) {\n    // Only invalid calls throw here (TypeError): a bad option, or a second call in one invocation.\n    request.headers[SIGNAL_HEADER] = { value: 'failed' };\n    request.headers[ERROR_HEADER] = { value: error.name + ': ' + error.message };\n  }\n  return request;\n}\n"
+      },
+      {
+        "hook": "viewer-response",
+        "file": "response-function.js",
+        "path": "patterns/05-edge-signal-sqs/response-function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-response function on /patterns/edge-signal-sqs/*: the way out.\n// The viewer-response hook runs on every response, cache hits included, so a call here\n// must be rare by construction: it fires only when the origin answered 5xx, or when the\n// viewer asked for a sample (x-signal-sample: 1). Everything else gets\n// x-signal-served: skipped and no call.\n// CloudFront does not run viewer-response functions when the origin returns 400 or\n// higher, so on the live demo the sample switch is what makes the call visible.\n\nconst QUEUE_ORIGIN_ID = 'edge-signal-sqs';\nconst SIGNAL_PATH = '/patterns/signal';\nconst MAX_DEDUP_ID_LENGTH = 128; // SQS FIFO limit\nconst FIRST_SERVER_ERROR = 500;\nconst SAMPLE_HEADER = 'x-signal-sample';\nconst SIGNAL_ID_HEADER = 'x-signal-id';\nconst SERVED_HEADER = 'x-signal-served';\nconst ERROR_HEADER = 'x-signal-served-error';\n\nfunction headerValue(headers, name) {\n  return headers[name] ? headers[name].value : '';\n}\n\n// Rare by construction: an origin 5xx, or an explicit sample request.\nfunction shouldSignal(request, status) {\n  return status >= FIRST_SERVER_ERROR || headerValue(request.headers, SAMPLE_HEADER) === '1';\n}\n\nfunction servedSignal(request, status) {\n  const uri = request.uri.slice(0, MAX_DEDUP_ID_LENGTH);\n  return {\n    kind: 'served',\n    uri: uri,\n    status: status,\n    // Correlates with the \"requested\" event that function.js sent on the way in.\n    signalId: headerValue(request.headers, SIGNAL_ID_HEADER) || uri,\n    // Its own FIFO dedup id, so it never collapses into the \"requested\" event.\n    dedupId: ('served:' + uri + ':' + status).slice(0, MAX_DEDUP_ID_LENGTH),\n    ts: Date.now(),\n  };\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const response = event.response;\n  const status = response.statusCode;\n\n  if (!shouldSignal(request, status)) {\n    response.headers[SERVED_HEADER] = { value: 'skipped' };\n    return response;\n  }\n\n  try {\n    cf.beacon(SIGNAL_PATH, {\n      originId: QUEUE_ORIGIN_ID,\n      method: 'POST',\n      headers: { 'content-type': 'application/json' }, // plain strings, not { value } objects\n      body: JSON.stringify(servedSignal(request, status)),\n      logDeliveryErrors: true, // a delivery failure after the function returned goes to CloudWatch Logs\n    });\n    response.headers[SERVED_HEADER] = { value: 'beacon' };\n  } catch (error) {\n    response.headers[SERVED_HEADER] = { value: 'failed' };\n    response.headers[ERROR_HEADER] = { value: error.name + ': ' + error.message };\n  }\n  return response;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "06",
+    "folder": "06-vpc-private-routing",
+    "id": "vpc-private-routing",
+    "title": "Private routing decision from a VPC origin",
+    "summary": "The function asks an internal ALB (CloudFront VPC origin, no public address) which backend a tenant belongs to, then rewrites the URI to that backend.",
+    "lesson": "Call a private service from the edge without exposing it, and keep a KVS kill switch that skips the network call entirely.",
+    "tags": [
+      "ai-gateway",
+      "routing"
+    ],
+    "tryPath": "/patterns/vpc-private-routing/whoami?tenant=acme",
+    "method": "GET",
+    "expect": "JSON with backend \"blue\" or \"green\" (stable per tenant) and headersFromFunction.x-backend set by the function. A failed call forwards unchanged: backend \"none\" and x-vpc-private-routing-error.",
+    "requests": [
+      {
+        "label": "Tenant acme"
+      },
+      {
+        "label": "Tenant globex",
+        "path": "/patterns/vpc-private-routing/whoami?tenant=globex"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "Kill switch off: no call, request forwarded unchanged",
+        "when": {
+          "headers": {
+            "x-backend": "^off$"
+          }
+        },
+        "take": [
+          "kill switch"
+        ],
+        "tone": "warn"
+      },
+      {
+        "label": "The private ALB chose a backend; the URI was rewritten",
+        "when": {
+          "json": {
+            "backend": "^(blue|green)$"
+          }
+        },
+        "take": [
+          "routing on"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Routing call failed: forwarded unchanged",
+        "when": {
+          "json": {
+            "backend": "^none$"
+          }
+        },
+        "take": [
+          "routing on"
+        ],
+        "tone": "warn",
+        "skip": [
+          "{\"backend\"",
+          "uri ="
+        ]
+      }
+    ],
+    "gist": "The doorman asks a back office nobody else can reach which room is yours.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "K": {
+        "name": "Notebook",
+        "icon": "📒",
+        "at": "kvs",
+        "service": "CloudFront KeyValueStore (shared)",
+        "access": "associated with the function; read with cf.kvs()"
+      },
+      "A": {
+        "name": "Back office",
+        "icon": "🏢",
+        "at": "origin",
+        "service": "Internal Application Load Balancer, Lambda target",
+        "access": "CloudFront VPC origin: private subnets, no public address"
+      }
+    },
+    "story": [
+      "You arrive and say which company you are with.",
+      "The doorman checks the on/off switch in his notebook.",
+      "Switch off: no question asked, you go in as you are.",
+      "Switch on: he asks the back office where your company sits.",
+      "Blue room or green room.",
+      "He points you to that room.",
+      "You walk to the room.",
+      "The room answers."
+    ],
+    "hooks": [
+      "viewer-request"
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as CloudFront Function (viewer-request)\n  participant K as KVS\n  participant A as VPC origin, internal ALB, Lambda target\n  V->>F: GET /patterns/vpc-private-routing/whoami?tenant=acme\n  F->>K: get(\"routing-kill-switch\")\n  alt kill switch \"off\"\n    F->>F: x-backend: off (no call)\n  else routing on\n    F->>A: cf.fetch GET /route?tenant=acme\n    A-->>F: {\"backend\":\"blue\" or \"green\"}\n    F->>F: uri = /patterns/vpc-private-routing/blue/whoami, x-backend\n  end\n  F->>A: forward (rewritten or unchanged)\n  A-->>V: 200 JSON from the chosen backend, or backend \"none\"",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/06-vpc-private-routing/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/vpc-private-routing/*.\n// 1. KVS kill switch: routing-kill-switch = off forwards unchanged, with no call.\n// 2. One call: GET /route?tenant=<x> on the private ALB (a VPC origin).\n// 3. Rewrite the URI to /patterns/vpc-private-routing/<backend>/... and set x-backend.\n// Any failure forwards unchanged, with x-vpc-private-routing-error.\n\nconst ROUTER_ORIGIN_ID = 'vpc-private-routing';\nconst ROUTE_PATH = '/route?tenant=';\nconst PATH_PREFIX = '/patterns/vpc-private-routing';\nconst KILL_SWITCH_KEY = 'routing-kill-switch';\nconst BACKENDS = ['blue', 'green'];\nconst DEFAULT_TENANT = 'guest';\nconst TENANT_HEADER = 'x-tenant';\nconst BACKEND_HEADER = 'x-backend';\nconst KVS_ERROR_HEADER = 'x-vpc-private-routing-kvs-error';\nconst ERROR_HEADER = 'x-vpc-private-routing-error';\n\nfunction describeError(error) {\n  return error.name + ': ' + error.message;\n}\n\n// ?tenant=<x> wins, then an x-tenant header, else \"guest\".\nfunction readTenant(request) {\n  const fromQuery = request.querystring.tenant;\n  if (fromQuery && fromQuery.value) return fromQuery.value;\n  const fromHeader = request.headers[TENANT_HEADER];\n  if (fromHeader && fromHeader.value) return fromHeader.value;\n  return DEFAULT_TENANT;\n}\n\n// A missing key means routing is on. Any other KVS error also leaves routing on, and is reported.\nasync function routingSwitchedOff(headers) {\n  try {\n    const killSwitch = await cf.kvs().get(KILL_SWITCH_KEY);\n    return killSwitch === 'off';\n  } catch (error) {\n    if (error.message.indexOf('KeyNotFound') === -1) headers[KVS_ERROR_HEADER] = { value: describeError(error) };\n    return false;\n  }\n}\n\n// The one network call. Resolves to blue or green, or throws.\nasync function lookupBackend(tenant) {\n  const routeResponse = await cf.fetch(ROUTE_PATH + encodeURIComponent(tenant), {\n    originId: ROUTER_ORIGIN_ID,\n    includeBody: true, // default false; the backend is in the body\n  });\n  if (!routeResponse.ok) throw new Error('route service returned ' + routeResponse.status);\n  const text = await routeResponse.text(); // assign first: no await inside call arguments\n  const route = JSON.parse(text);\n  if (BACKENDS.indexOf(route.backend) === -1) throw new Error('unknown backend ' + route.backend);\n  return route.backend;\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  const tenant = readTenant(request);\n  headers[TENANT_HEADER] = { value: tenant };\n\n  if (await routingSwitchedOff(headers)) {\n    headers[BACKEND_HEADER] = { value: 'off' };\n    return request;\n  }\n\n  try {\n    const backend = await lookupBackend(tenant);\n    request.uri = PATH_PREFIX + '/' + backend + request.uri.slice(PATH_PREFIX.length);\n    headers[BACKEND_HEADER] = { value: backend };\n  } catch (error) {\n    // TypeError, TimeoutError, InternalError, or a bad answer: forward unchanged.\n    headers[ERROR_HEADER] = { value: describeError(error) };\n  }\n  return request;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "07",
+    "folder": "07-kvs-config-plus-fetch",
+    "id": "kvs-config-plus-fetch",
+    "title": "Read-through config: KVS first, fetch on a miss, hot keys promoted",
+    "summary": "The function reads a key's config (a tenant's plan, a model route, a rate limit) from KVS; on a miss it makes one call to the origin, which counts the read, and a key read 5 times in a minute is promoted into KVS for 10 minutes.",
+    "lesson": "Read through KVS: a hit costs no call, a miss costs one, and only hot keys earn a place in KVS, written off the request path. Fail open: serve the expired copy, else a default, and always forward the request.",
+    "tags": [
+      "ai-gateway",
+      "config"
+    ],
+    "tryPath": "/patterns/kvs-config-plus-fetch/acme",
+    "method": "GET",
+    "expect": "200 JSON echo with x-config-source origin and x-config-hits n/5 on a cold key; after 5 reads in a minute, about a minute later x-config-source kvs with no call.",
+    "requests": [
+      {
+        "label": "Read acme"
+      },
+      {
+        "label": "Read globex",
+        "path": "/patterns/kvs-config-plus-fetch/globex"
+      },
+      {
+        "label": "Read an unknown key",
+        "path": "/patterns/kvs-config-plus-fetch/initech"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "Fresh copy in KVS: answered at the edge, no call",
+        "when": {
+          "headers": {
+            "x-config-source": "^kvs$"
+          }
+        },
+        "take": [
+          "fresh entry"
+        ],
+        "lastStep": 10,
+        "tone": "ok"
+      },
+      {
+        "label": "Miss: fetched from the origin, and that read made the key hot, so it gets promoted to KVS",
+        "when": {
+          "headers": {
+            "x-config-source": "^origin$",
+            "x-config-hits": "^(\\d+)/\\1$"
+          }
+        },
+        "take": [
+          "miss or expired"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Miss: one call fetched it from the origin and counted the read",
+        "when": {
+          "headers": {
+            "x-config-source": "^origin$"
+          }
+        },
+        "take": [
+          "miss or expired"
+        ],
+        "lastStep": 10,
+        "tone": "ok"
+      },
+      {
+        "label": "The call failed: served the expired copy from KVS",
+        "when": {
+          "headers": {
+            "x-config-source": "^kvs-stale$"
+          }
+        },
+        "take": [
+          "call fails"
+        ],
+        "lastStep": 10,
+        "tone": "warn"
+      },
+      {
+        "label": "The call failed and KVS had nothing: default config",
+        "when": {
+          "headers": {
+            "x-config-source": "^default$"
+          }
+        },
+        "take": [
+          "call fails"
+        ],
+        "lastStep": 10,
+        "tone": "warn"
+      }
+    ],
+    "gist": "The doorman looks in his notebook first and phones the clerk only when it is not there; settings asked for often get copied into the notebook by themselves.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "K": {
+        "name": "Notebook",
+        "icon": "📒",
+        "at": "kvs",
+        "service": "CloudFront KeyValueStore (shared)",
+        "access": "read by the function; written by the promoter (UpdateKeys)"
+      },
+      "L": {
+        "name": "Config clerk",
+        "icon": "🗂️",
+        "at": "origin",
+        "service": "Lambda Web Function",
+        "access": "OAC signs it (SigV4)"
+      },
+      "D": {
+        "name": "Tally board",
+        "icon": "🧮",
+        "at": "backend",
+        "service": "DynamoDB table (hit counters)",
+        "access": "the origin Lambda's IAM role; its stream feeds the promoter"
+      },
+      "P": {
+        "name": "Promoter",
+        "icon": "📣",
+        "at": "backend",
+        "lane": "background",
+        "service": "Lambda function (promoter)",
+        "access": "triggered by the table's stream"
+      }
+    },
+    "story": [
+      "You ask for the settings for acme.",
+      "The doorman rubs out any settings you wrote yourself.",
+      "He looks in his notebook first.",
+      "A fresh copy is there: no phone call.",
+      "Not there, or too old: he asks the config clerk.",
+      "The clerk adds a tick to acme's tally for this minute.",
+      "Here are the settings, and the tally so far.",
+      "The clerk did not answer: an old copy, or the default.",
+      "You go in carrying the settings.",
+      "You see which settings you got, and where from.",
+      "Behind the scenes, separate from your visit:",
+      "Five ticks in one minute: acme is popular.",
+      "The promoter pins a ten-minute marker on the board.",
+      "The marker is up.",
+      "The promoter copies acme's settings into the notebook.",
+      "Ten minutes later the marker falls off.",
+      "The promoter rubs acme out of the notebook again."
+    ],
+    "hooks": [
+      "viewer-request"
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as CloudFront Function (viewer-request)\n  participant K as KVS\n  participant L as Config Web Function \"kvs-config-plus-fetch\" (IamAuth + OAC)\n  participant D as DynamoDB hot-key table\n  participant P as Promoter Lambda\n  V->>F: GET /patterns/kvs-config-plus-fetch/acme\n  F->>F: drop viewer x-config-*\n  F->>K: get(\"cfg-acme\")\n  alt fresh entry\n    K-->>F: {\"exp\":...,\"config\":{...}} (x-config-source: kvs, no call)\n  else miss or expired\n    F->>L: cf.fetch GET /config/acme\n    L->>D: ADD hits on hits#35;acme#35;<minute>\n    L-->>F: {\"config\":{...},\"hits\":3,\"threshold\":5} (x-config-source: origin)\n  else call fails\n    F->>F: expired entry (kvs-stale), else DEFAULT_CONFIG (default), x-config-error\n  end\n  F->>L: forward with x-config, x-config-key, x-config-source\n  L-->>V: 200 JSON echo of the x-config-* headers\n  Note over D,P: off the request path, from the table's stream\n  D-->>P: counter reached 5\n  P->>D: put marker kvs#35;acme (TTL = now + 10 min)\n  D-->>P: marker written\n  P->>K: UpdateKeys put cfg-acme (reaches the edge in about a minute)\n  D-->>P: marker removed by TTL\n  P->>K: UpdateKeys delete cfg-acme",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/07-kvs-config-plus-fetch/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/kvs-config-plus-fetch/<key>.\n// Read-through config per key (a tenant, an API key, a model route):\n//   fresh KVS entry -> use it, no network call\n//   miss or expired -> one call: GET /config/<key> on this pattern's origin\n//   call fails      -> the expired KVS entry if there is one, else DEFAULT_CONFIG; the request is never blocked\n// The origin counts reads per key, and hot keys are written to KVS off the request path,\n// so their next reads are KVS hits. The result is forwarded in the x-config-* headers.\n\nconst CONFIG_ORIGIN_ID = 'kvs-config-plus-fetch';\nconst PATH_PREFIX = '/patterns/kvs-config-plus-fetch/';\nconst CONFIG_PATH = '/config/';\nconst KVS_KEY_PREFIX = 'cfg-'; // the promoter writes { exp, config } under cfg-<key>\nconst DEFAULT_KEY = 'default';\nconst KEY_PATTERN = /^[a-z0-9-]{1,32}$/;\nconst DEFAULT_CONFIG = { plan: 'free', model: 'small', rateLimit: 10 };\nconst CONFIG_HEADER = 'x-config';\nconst KEY_HEADER = 'x-config-key';\nconst SOURCE_HEADER = 'x-config-source';\nconst HITS_HEADER = 'x-config-hits';\nconst ERROR_HEADER = 'x-config-error';\nconst OWN_HEADERS = [CONFIG_HEADER, KEY_HEADER, SOURCE_HEADER, HITS_HEADER, ERROR_HEADER];\n\nfunction badKey() {\n  return { statusCode: 400, statusDescription: 'Bad Request', body: 'key must be 1-32 characters of a-z, 0-9 and -' };\n}\n\n// A missing key, or no KVS associated, throws: that is a miss.\nasync function readCachedEntry(key) {\n  try {\n    return await cf.kvs().get(KVS_KEY_PREFIX + key, { format: 'json' });\n  } catch (error) {\n    return null;\n  }\n}\n\n// exp is in seconds, as the promoter writes it.\nfunction isFresh(entry) {\n  return entry.exp * 1000 > Date.now();\n}\n\n// The one network call, which also counts the read. Resolves to { config, hits, threshold }, or throws.\nasync function fetchConfig(key) {\n  const configResponse = await cf.fetch(CONFIG_PATH + key, {\n    originId: CONFIG_ORIGIN_ID,\n    includeBody: true, // default false; the config is in the body\n  });\n  if (!configResponse.ok) throw new Error('origin returned ' + configResponse.status);\n  const text = await configResponse.text(); // assign first: no await inside call arguments\n  const answer = JSON.parse(text);\n  if (!answer.config) throw new Error('no config in the origin response');\n  return answer;\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  // Only this function may set these for the origin: drop viewer-supplied copies.\n  OWN_HEADERS.forEach((name) => delete headers[name]);\n\n  const key = request.uri.slice(PATH_PREFIX.length).split('/')[0] || DEFAULT_KEY;\n  if (!KEY_PATTERN.test(key)) return badKey();\n\n  const cached = await readCachedEntry(key);\n  let config = DEFAULT_CONFIG;\n  let source = 'default';\n  if (cached && isFresh(cached)) {\n    config = cached.config;\n    source = 'kvs';\n  } else {\n    try {\n      const fetched = await fetchConfig(key);\n      config = fetched.config;\n      source = 'origin';\n      if (typeof fetched.hits === 'number') headers[HITS_HEADER] = { value: fetched.hits + '/' + fetched.threshold };\n    } catch (error) {\n      // TypeError, TimeoutError, InternalError, a bad status or body: fail open, stale beats default.\n      headers[ERROR_HEADER] = { value: error.name + ': ' + error.message };\n      if (cached) {\n        config = cached.config;\n        source = 'kvs-stale';\n      }\n    }\n  }\n\n  headers[KEY_HEADER] = { value: key };\n  headers[SOURCE_HEADER] = { value: source };\n  headers[CONFIG_HEADER] = { value: JSON.stringify(config) };\n  return request;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "08",
+    "folder": "08-origin-health-fallback",
+    "id": "origin-health-fallback",
+    "title": "POST failover: origin health probe + secondary",
+    "summary": "Failover for POST traffic, which origin groups cannot do: when gated on, the request function probes GET /health on the primary with cf.fetch and, if it times out (the runtime's fixed 1 s) or is down, sends the POST to a secondary Lambda Web Function with selectRequestOriginById. GET/HEAD also get a runtime origin group (S3 mirror on 5xx).",
+    "lesson": "Origin groups only fail over GET/HEAD/OPTIONS, and viewer-response never runs for status 400+, so for POST the edge function is the only place to decide before the request is sent. Gate the probe (KVS health-probe) or you pay a call per request; fail open when the call is unavailable.",
+    "tags": [
+      "ai-gateway",
+      "resilience"
+    ],
+    "hooks": [
+      "viewer-request",
+      "viewer-response"
+    ],
+    "tryPath": "/patterns/origin-health-fallback/infer?probe=on&simulate=slow",
+    "method": "POST",
+    "expect": "The primary's /health sleeps 1.5 s, past the fixed 1 s runtime timeout: x-health-probe: unhealthy:timeout, x-route: fallback, and the secondary answers the POST: x-served-by: secondary, x-fallback: true, body servedBy \"secondary\".",
+    "body": {
+      "prompt": "Say hello in one word",
+      "max_tokens": 8
+    },
+    "requests": [
+      {
+        "label": "Slow primary (1.5 s /health)"
+      },
+      {
+        "label": "Healthy primary",
+        "path": "/patterns/origin-health-fallback/infer?probe=on"
+      },
+      {
+        "label": "Probe gate off",
+        "path": "/patterns/origin-health-fallback/infer"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "Primary timed out or down: the POST went to the secondary",
+        "when": {
+          "headers": {
+            "x-route": "^fallback$"
+          }
+        },
+        "take": [
+          "probe gate on",
+          "non-2xx"
+        ],
+        "tone": "warn",
+        "skip": [
+          "GET and HEAD"
+        ]
+      },
+      {
+        "label": "Probe healthy: the POST went to the primary",
+        "when": {
+          "headers": {
+            "x-health-probe": "^ok"
+          }
+        },
+        "take": [
+          "probe gate on",
+          "healthy"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Probe gated off: straight to the primary, no call",
+        "when": {
+          "headers": {
+            "x-health-probe": "^(off|unavailable)"
+          }
+        },
+        "take": [
+          "probe gate off",
+          "healthy"
+        ],
+        "tone": "ok"
+      }
+    ],
+    "gist": "Before passing on your order, the doorman checks the main kitchen is quick; if not, the backup kitchen cooks it.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "K": {
+        "name": "Notebook",
+        "icon": "📒",
+        "at": "kvs",
+        "service": "CloudFront KeyValueStore (shared)",
+        "access": "associated with the function; read with cf.kvs()"
+      },
+      "P": {
+        "name": "Main kitchen",
+        "icon": "🍳",
+        "at": "origin",
+        "service": "Lambda Web Function (primary)",
+        "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+      },
+      "S": {
+        "name": "Backup kitchen",
+        "icon": "🧑‍🍳",
+        "at": "origin",
+        "service": "Lambda Web Function (secondary)",
+        "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+      },
+      "M": {
+        "name": "Photo menu",
+        "icon": "🖼️",
+        "at": "origin",
+        "service": "Amazon S3 bucket (static mirror)",
+        "access": "OAC signs it (SigV4)"
+      },
+      "R": {
+        "name": "Exit greeter",
+        "icon": "👋",
+        "at": "viewer-response"
+      }
+    },
+    "story": [
+      "You hand in an order.",
+      "The doorman checks whether to test the kitchen first.",
+      "No test: the order goes to the main kitchen.",
+      "Test: are you quick today? He waits one second at most.",
+      "The kitchen answers.",
+      "Quick: your order goes to the main kitchen.",
+      "The main kitchen cooks it.",
+      "Too slow or closed: your order goes to the backup kitchen.",
+      "Just looking? You would see the photo menu instead.",
+      "The backup kitchen cooks it.",
+      "The greeter notes which kitchen cooked.",
+      "You get your food."
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer\n  participant F as viewer-request function\n  participant K as KVS\n  participant P as Primary Web Function \"origin-health-fallback\" (IamAuth + OAC)\n  participant S as Secondary Web Function \"origin-health-fallback-secondary\" (POST standby)\n  participant M as S3 static mirror (GET and HEAD)\n  participant R as viewer-response function\n  V->>F: POST /patterns/origin-health-fallback/infer?probe=on\n  F->>K: get(\"health-probe\") (?probe= overrides)\n  alt probe gate off, or the call unavailable\n    F->>F: x-health-probe: off or unavailable, x-route: primary (fail open)\n  else probe gate on\n    F->>P: cf.fetch GET /health, includeBody false (1 s runtime timeout)\n    P-->>F: status, or TimeoutError after 1 s\n  end\n  alt healthy, or failing open\n    F->>P: POST goes to the primary (GET and HEAD via an origin group with the mirror)\n    P-->>R: response\n  else non-2xx or TimeoutError\n    F->>S: POST: selectRequestOriginById(secondary), x-route: fallback\n    Note over F,M: GET and HEAD: selectRequestOriginById(mirror) instead\n    S-->>R: response\n  end\n  R->>R: x-served-by: primary, secondary or fallback, copy the verdict headers\n  R-->>V: response (viewer-response does not run on 4xx or 5xx)",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/08-origin-health-fallback/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/origin-health-fallback/*.\n// Failover for POST, which origin groups cannot do: they only fail over GET, HEAD and\n// OPTIONS, so a POST to a primary that is down simply fails. This function decides\n// before the request leaves the edge, with one call: GET /health on the primary.\n// \"Slow\" means the runtime's fixed 1 s TimeoutError (no option, and Date.now() does\n// not advance across the await, so a tighter budget cannot be timed here).\n//   2xx                                           -> x-route: primary\n//   non-2xx, TimeoutError, InternalError, or a\n//   TypeError \"... due to <result type>\" (the edge\n//   could not reach the primary: DNS, TLS, connect) -> x-route: fallback\n//       POST, PUT, PATCH, DELETE -> the secondary Lambda\n//       GET, HEAD                -> the S3 mirror\n//   any other TypeError (the call itself is invalid) -> x-route: primary (fail open)\n// GET and HEAD on the primary route also get an origin group (primary, then the\n// mirror on 5xx). The probe costs a call per request, so it runs only when the KVS\n// key health-probe is on.\n\nconst PRIMARY_ORIGIN_ID = 'origin-health-fallback';\nconst MIRROR_ORIGIN_ID = 'origin-health-fallback-static';\nconst SECONDARY_ORIGIN_ID = 'origin-health-fallback-secondary';\nconst HEALTH_PATH = '/health';\nconst PROBE_SWITCH_KEY = 'health-probe';\nconst FAILOVER_STATUS_CODES = [500, 502, 503, 504];\nconst ROUTE_HEADER = 'x-route';\nconst ROUTE_ERROR_HEADER = 'x-route-error';\nconst PROBE_HEADER = 'x-health-probe';\nconst PROBE_ERROR_HEADER = 'x-health-probe-error';\n\nfunction describeError(error) {\n  return error.name + ': ' + error.message;\n}\n\n// The runtime also uses TypeError when the edge could not reach the origin, naming the\n// x-edge-detailed-result-type: \"The request could not be completed due to OriginDnsError\".\n// That says the primary is down, so it fails over; any other TypeError is a bad call.\nfunction originUnreachable(error) {\n  return error.name === 'TypeError' && error.message.indexOf('could not be completed due to') !== -1;\n}\n\n// Never trust routing headers coming from the viewer.\nfunction stripRoutingHeaders(headers) {\n  delete headers[ROUTE_HEADER];\n  delete headers[ROUTE_ERROR_HEADER];\n  delete headers[PROBE_HEADER];\n  delete headers[PROBE_ERROR_HEADER];\n}\n\n// ?probe=on|off wins (for the demo), then the KVS key health-probe. Default off.\nasync function probeEnabled(request) {\n  const fromQuery = request.querystring.probe;\n  if (fromQuery && (fromQuery.value === 'on' || fromQuery.value === 'off')) return fromQuery.value === 'on';\n  try {\n    const probeSwitch = await cf.kvs().get(PROBE_SWITCH_KEY);\n    return probeSwitch === 'on';\n  } catch (error) {\n    return false;\n  }\n}\n\n// /health, plus ?simulate=<x> for the demo: it makes the primary slow or down.\nfunction healthPath(request) {\n  const simulate = request.querystring.simulate;\n  return simulate ? HEALTH_PATH + '?simulate=' + simulate.value : HEALTH_PATH;\n}\n\n// The one network call. Resolves to { route, probe }; never throws.\nasync function probePrimary(request, headers) {\n  try {\n    // No body read (includeBody defaults to false): the status is the verdict.\n    const healthResponse = await cf.fetch(healthPath(request), { originId: PRIMARY_ORIGIN_ID });\n    if (!healthResponse.ok) return { route: 'fallback', probe: 'unhealthy:' + healthResponse.status };\n    return { route: 'primary', probe: 'ok' };\n  } catch (error) {\n    headers[PROBE_ERROR_HEADER] = { value: describeError(error) };\n    // A bad call says nothing about the origin: fail open.\n    if (error.name === 'TypeError' && !originUnreachable(error)) return { route: 'primary', probe: 'unavailable' };\n    return { route: 'fallback', probe: error.name === 'TimeoutError' ? 'unhealthy:timeout' : 'unhealthy:error' };\n  }\n}\n\n// Fallback: the mirror can replay a GET or HEAD, only the secondary can take a write.\n// Primary: a GET or HEAD still fails over to the mirror on 5xx.\nfunction selectOrigins(route, replayable) {\n  if (route === 'fallback') {\n    cf.selectRequestOriginById(replayable ? MIRROR_ORIGIN_ID : SECONDARY_ORIGIN_ID);\n  } else if (replayable) {\n    cf.createRequestOriginGroup({\n      originIds: [{ originId: PRIMARY_ORIGIN_ID }, { originId: MIRROR_ORIGIN_ID }],\n      failoverCriteria: { statusCodes: FAILOVER_STATUS_CODES },\n    });\n  }\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  stripRoutingHeaders(headers);\n  if (request.uri.slice(-1) === '/') request.uri += 'index.html';\n  const replayable = request.method === 'GET' || request.method === 'HEAD';\n\n  let health = { route: 'primary', probe: 'off' };\n  if (await probeEnabled(request)) health = await probePrimary(request, headers);\n\n  try {\n    selectOrigins(health.route, replayable);\n  } catch (error) {\n    // The request still goes to the primary.\n    headers[ROUTE_ERROR_HEADER] = { value: describeError(error) };\n  }\n  headers[ROUTE_HEADER] = { value: health.route };\n  headers[PROBE_HEADER] = { value: health.probe };\n  return request;\n}\n"
+      },
+      {
+        "hook": "viewer-response",
+        "file": "response-function.js",
+        "path": "patterns/08-origin-health-fallback/response-function.js",
+        "source": "// Viewer-response function on /patterns/origin-health-fallback/*. No network call.\n// CloudFront does not run viewer-response functions when the origin answered 400 or\n// higher, so this only ever sees successes and only annotates them:\n//   x-served-by: primary    the primary Lambda set x-origin: lambda\n//   x-served-by: secondary  the standby Lambda set x-origin: lambda-secondary\n//   x-served-by: fallback   no marker: the S3 mirror answered\n//   x-fallback: true        on anything but primary\n// It also copies the request function's verdict headers onto the response.\n// Compare x-route with x-served-by to tell \"probe decided\" from \"group failed over\".\n\nconst ORIGIN_MARKER_HEADER = 'x-origin';\nconst SERVED_BY_HEADER = 'x-served-by';\nconst FALLBACK_HEADER = 'x-fallback';\nconst PRIMARY_MARKER = 'lambda';\nconst SECONDARY_MARKER = 'lambda-secondary';\nconst VERDICT_HEADERS = ['x-route', 'x-health-probe', 'x-health-probe-error', 'x-route-error'];\n\nfunction servedBy(marker) {\n  if (marker === PRIMARY_MARKER) return 'primary';\n  if (marker === SECONDARY_MARKER) return 'secondary';\n  return 'fallback';\n}\n\nfunction copyVerdictHeaders(requestHeaders, responseHeaders) {\n  for (let i = 0; i < VERDICT_HEADERS.length; i++) {\n    const header = requestHeaders[VERDICT_HEADERS[i]];\n    if (header) responseHeaders[VERDICT_HEADERS[i]] = { value: header.value };\n  }\n}\n\nfunction handler(event) {\n  const headers = event.response.headers;\n\n  // The marker is internal: read it, then drop it.\n  const marker = headers[ORIGIN_MARKER_HEADER] ? headers[ORIGIN_MARKER_HEADER].value : '';\n  delete headers[ORIGIN_MARKER_HEADER];\n  const origin = servedBy(marker);\n  headers[SERVED_BY_HEADER] = { value: origin };\n  if (origin !== 'primary') headers[FALLBACK_HEADER] = { value: 'true' };\n\n  copyVerdictHeaders(event.request.headers, headers);\n  return event.response;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "09",
+    "folder": "09-agent-authz",
+    "id": "agent-authz",
+    "title": "Per-resource authorization for AI agents",
+    "summary": "An agent sends a scoped token on every request; the function POSTs { action, resource, token } to an authorization service and forwards the request only when it answers allowed: true.",
+    "lesson": "A token says who the agent is, not whether it may act on this resource right now. Ask on every request at the edge: denied calls never reach the backend, and allowed reads can still be cache hits because viewer request runs before the cache.",
+    "tags": [
+      "agents",
+      "auth"
+    ],
+    "tryPath": "/patterns/agent-authz/orders/48291",
+    "method": "GET",
+    "expect": "No Authorization header: 401 {\"error\":\"unauthorized\"}, no call made. Authorization: Bearer demo-agent-token on /orders/48291: 200 order JSON (cacheable); on /orders/70113 or with any write method: 403 {\"error\":\"forbidden\"}. An unreachable authorization service: 503 {\"error\":\"authz_unavailable\"} (fail closed).",
+    "requests": [
+      {
+        "label": "Agent reads its order",
+        "headers": {
+          "authorization": "Bearer demo-agent-token"
+        }
+      },
+      {
+        "label": "Agent reads someone else's order",
+        "path": "/patterns/agent-authz/orders/70113",
+        "headers": {
+          "authorization": "Bearer demo-agent-token"
+        }
+      },
+      {
+        "label": "No token"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "No token: answered 401 at the edge, no call made",
+        "when": {
+          "status": 401
+        },
+        "stopAfter": "no Authorization header",
+        "tone": "bad"
+      },
+      {
+        "label": "Allowed: the order came back (and may be cached)",
+        "when": {
+          "status": 200
+        },
+        "take": [
+          "allowed true"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Not allowed for this resource: 403 from the edge",
+        "when": {
+          "status": 403,
+          "json": {
+            "error": "^forbidden$"
+          }
+        },
+        "take": [
+          "allowed false"
+        ],
+        "tone": "bad"
+      },
+      {
+        "label": "Authorization service unreachable: 503, failing closed",
+        "when": {
+          "status": 503
+        },
+        "take": [
+          "non-2xx"
+        ],
+        "tone": "bad"
+      }
+    ],
+    "gist": "A robot helper wants an order; the doorman asks the permission desk every single time.",
+    "actors": {
+      "V": {
+        "name": "Robot helper",
+        "icon": "🤖",
+        "at": "viewer"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "C": {
+        "name": "Pickup shelf",
+        "icon": "🗃️",
+        "at": "cache"
+      },
+      "A": {
+        "name": "Permission desk",
+        "icon": "📋",
+        "at": "call",
+        "service": "Lambda Web Function",
+        "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+      }
+    },
+    "story": [
+      "A robot helper asks for an order, holding a pass.",
+      "No pass? Not today (401).",
+      "The doorman asks the desk: may this robot see this order?",
+      "Yes.",
+      "The robot goes to the pickup shelf.",
+      "It gets the order, maybe already waiting on the shelf.",
+      "No.",
+      "Not yours (403); the shop never hears of it.",
+      "The desk did not answer, so no (503)."
+    ],
+    "cachePolicy": "CachingOptimized",
+    "hooks": [
+      "viewer-request"
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Agent\n  participant F as CloudFront Function (viewer-request)\n  participant C as CloudFront cache\n  participant A as Lambda Web Function \"agent-authz\" (IamAuth + OAC)\n  V->>F: GET /patterns/agent-authz/orders/48291, Authorization: Bearer demo-agent-token\n  alt no Authorization header, or an empty one\n    F-->>V: 401 unauthorized (no call made)\n  end\n  F->>A: cf.fetch POST /v1/check {action: \"read\", resource: uri, token}\n  alt allowed true\n    A-->>F: {\"allowed\":true}\n    F->>C: forward the request\n    C-->>V: 200 order (cache hit, or from the orders route, cached 60 s)\n  else allowed false\n    A-->>F: {\"allowed\":false}\n    F-->>V: 403 forbidden\n  else non-2xx, bad JSON, error or timeout\n    F-->>V: 503 authz_unavailable, x-agent-authz-error\n  end",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/09-agent-authz/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/agent-authz/*.\n// An AI agent sends a scoped token on every request. The token proves who the agent is, not\n// whether it may touch THIS resource right now, so the function asks the authorization service\n// with one POST /v1/check { action, resource, token } and forwards the request only on\n// { allowed: true }. No token: 401, no call. Not allowed: 403. A service that cannot be asked\n// fails closed with 503. Viewer request runs before the cache, so allowed reads can be cache hits.\n\nconst AUTHZ_ORIGIN_ID = 'agent-authz';\nconst CHECK_PATH = '/v1/check';\nconst ERROR_HEADER = 'x-agent-authz-error';\nconst STATUS_TEXT = { 401: 'Unauthorized', 403: 'Forbidden', 503: 'Service Unavailable' };\n\n// What the agent wants to do: read or write this URI, with this token.\nfunction accessCheck(request, token) {\n  return {\n    action: request.method === 'GET' || request.method === 'HEAD' ? 'read' : 'write',\n    resource: request.uri,\n    // In the body, not the authorization header: OAC signs the call and owns that header.\n    token: token,\n  };\n}\n\n// The one network call. Resolves to { ok, status, decision }; throws when the service\n// cannot be asked or its answer is not JSON.\nasync function askAuthz(check) {\n  const body = JSON.stringify(check);\n  const authzResponse = await cf.fetch(CHECK_PATH, {\n    originId: AUTHZ_ORIGIN_ID,\n    method: 'POST',\n    headers: {\n      'content-type': 'application/json',\n    },\n    body: body,\n    includeBody: true, // default false; the decision is in the body\n  });\n  if (!authzResponse.ok) return { ok: false, status: authzResponse.status };\n  const text = await authzResponse.text(); // assign first: no await inside call arguments\n  return { ok: true, status: authzResponse.status, decision: JSON.parse(text) };\n}\n\nfunction deny(status, code, error) {\n  const headers = {\n    'content-type': { value: 'application/json' },\n    'cache-control': { value: 'no-store' },\n  };\n  if (status === 401) headers['www-authenticate'] = { value: 'Bearer' };\n  if (error) headers[ERROR_HEADER] = { value: error };\n  return { statusCode: status, statusDescription: STATUS_TEXT[status], headers: headers, body: JSON.stringify({ error: code }) };\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const authorization = request.headers.authorization;\n  // No header, or an empty one: refuse here, without spending the call.\n  if (!authorization || !authorization.value.trim()) return deny(401, 'unauthorized');\n\n  let answer;\n  try {\n    answer = await askAuthz(accessCheck(request, authorization.value));\n  } catch (error) {\n    // Fail closed: TypeError, TimeoutError, InternalError, or a body that is not JSON.\n    return deny(503, 'authz_unavailable', error.name + ': ' + error.message);\n  }\n  if (!answer.ok) return deny(503, 'authz_unavailable', 'authz returned ' + answer.status);\n\n  const decision = answer.decision;\n  if (!decision || decision.allowed !== true) return deny(403, 'forbidden');\n  return request;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "10",
+    "folder": "10-markdown-on-demand",
+    "id": "markdown-on-demand",
+    "title": "Markdown on demand for AI agents",
+    "summary": "An AI agent (Accept: text/markdown, or an AI bot labelled by AWS WAF Bot Control) gets a markdown copy of the page when KVS says one exists; otherwise the HTML, and the function fires one cf.beacon with the page URI into SQS FIFO so a worker converts it offline.",
+    "lesson": "The one network call is the beacon, so 'does markdown exist yet?' must come from KVS, which the worker writes after it stores the .md. A beacon is best effort and billed: a dropped one only means the next agent request asks again, and the FIFO queue deduplicates the burst.",
+    "tags": [
+      "agents",
+      "ai-gateway"
+    ],
+    "hooks": [
+      "viewer-request",
+      "viewer-response"
+    ],
+    "tryPath": "/patterns/markdown-on-demand/guide.html",
+    "method": "GET",
+    "expect": "A browser: 200 text/html, x-markdown: skipped. With Accept: text/markdown the first time: 200 text/html and x-markdown: queued (one beacon). Wait about a minute (worker + KVS propagation), then the same request: 200 text/markdown, x-markdown: served. Reset this page: 200 JSON, x-markdown: reset; about a minute later the agent request is queued again.",
+    "requests": [
+      {
+        "label": "Agent asks for markdown",
+        "headers": {
+          "accept": "text/markdown"
+        }
+      },
+      {
+        "label": "A browser asks for the page",
+        "headers": {
+          "accept": "text/html"
+        }
+      },
+      {
+        "label": "Reset this page",
+        "path": "/patterns/markdown-on-demand/reset?page=guide.html"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "A markdown copy exists: the agent got the .md",
+        "when": {
+          "headers": {
+            "x-markdown": "^served$"
+          }
+        },
+        "take": [
+          "an agent",
+          "key found"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "No markdown yet: the agent got the HTML, and one beacon asked for a copy",
+        "when": {
+          "headers": {
+            "x-markdown": "^queued$"
+          }
+        },
+        "take": [
+          "an agent",
+          "KeyNotFound"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "A browser: the normal HTML page, no KVS read and no beacon",
+        "when": {
+          "headers": {
+            "x-markdown": "^skipped$"
+          }
+        },
+        "take": [
+          "a browser"
+        ],
+        "tone": "ok"
+      },
+      {
+        "label": "Reset queued: the worker deletes the page's KVS key and keeps the .md for edges that still have it. In about a minute the next agent request is queued again",
+        "when": {
+          "headers": {
+            "x-markdown": "^reset$"
+          }
+        },
+        "take": [
+          "reset a page"
+        ],
+        "stopAfter": "reset a page",
+        "tone": "ok"
+      }
+    ],
+    "gist": "People get the normal page; robots that prefer markdown get a markdown copy when one exists, and if not, the doorman orders one for next time.",
+    "waf": "Bot Control in count mode labels AI bots; two count rules write x-amzn-waf-ai-agent on every request here: the bot's name, or none.",
+    "actors": {
+      "V": {
+        "name": "Visitor",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "B": {
+        "name": "Gatekeeper",
+        "icon": "🛡️",
+        "at": "waf"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "K": {
+        "name": "Notebook",
+        "icon": "📒",
+        "at": "kvs",
+        "service": "CloudFront KeyValueStore (shared)",
+        "access": "read by the function; written by the worker"
+      },
+      "S": {
+        "name": "Page shelf",
+        "icon": "📚",
+        "at": "origin",
+        "service": "Amazon S3 bucket (pages and .md copies)",
+        "access": "OAC signs it (SigV4)"
+      },
+      "A": {
+        "name": "Mail clerk",
+        "icon": "📮",
+        "at": "call",
+        "service": "API Gateway REST API with an SQS integration",
+        "access": "CloudFront adds the x-api-key header"
+      },
+      "Q": {
+        "name": "Mailbox",
+        "icon": "📬",
+        "at": "backend",
+        "service": "Amazon SQS FIFO queue",
+        "access": "API Gateway's IAM role sends the message"
+      },
+      "W": {
+        "name": "Rewriter",
+        "icon": "✍️",
+        "at": "backend",
+        "lane": "background",
+        "service": "Lambda function (worker, turndown)",
+        "access": "triggered by the queue; writes the .md and the KVS key, a reset deletes the key"
+      },
+      "R": {
+        "name": "Exit greeter",
+        "icon": "👋",
+        "at": "viewer-response"
+      }
+    },
+    "story": [
+      "Every visitor passes the gatekeeper, who knows AI robots by sight (AWS WAF Bot Control).",
+      "He pins a badge on each one for the doorman: the robot's name, or none.",
+      "A visitor asks the doorman to forget a page's markdown copy.",
+      "He drops a 'please forget' note in the mail slot.",
+      "The clerk puts the note in the mailbox.",
+      "The doorman answers himself: the note is on its way.",
+      "The rewriter picks up the note.",
+      "It crosses the copy out of the notebook, gone in about a minute; the copy stays on the shelf.",
+      "A person asks for a page.",
+      "A person gets the normal page, no notebook, no note.",
+      "A robot that prefers markdown asks for the page.",
+      "The doorman checks his notebook for a markdown copy.",
+      "Yes, and here is where it is.",
+      "He sends the robot to the markdown copy.",
+      "No copy yet: he drops a 'please convert' note in the mail slot.",
+      "The clerk puts the note in the mailbox.",
+      "Meanwhile the robot gets the normal page.",
+      "The rewriter picks up the note.",
+      "It reads the page and writes a markdown copy.",
+      "It notes the copy in the notebook, ready in about a minute.",
+      "The shelf hands over the page.",
+      "On the way out, the greeter says which one you got."
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Viewer (browser or agent)\n  participant B as AWS WAF (Bot Control, count)\n  participant F as viewer-request function\n  participant K as KVS\n  participant S as S3 bucket (pages + .md)\n  participant A as API Gateway REST API (x-api-key)\n  participant Q as SQS FIFO queue\n  participant W as worker Lambda (turndown)\n  participant R as viewer-response function\n  V->>B: GET /patterns/markdown-on-demand/...\n  B->>F: request + x-amzn-waf-ai-agent: the bot's name (gptbot, claudebot, ...) or none\n  alt reset a page (anyone, a page under this path)\n    V->>F: GET /patterns/markdown-on-demand/reset?page=guide.html\n    F-)A: cf.beacon POST /patterns/convert {action: reset, uri, at}\n    A-)Q: SendMessage (at: a reset is never a repeat)\n    F-->>V: 200 JSON reset queued (x-markdown: reset, no-store)\n    Q-)W: {action: reset, uri}\n    W->>K: DeleteKey md:<uri> only, the .md stays (leaves the edge in about a minute)\n  else a browser (no markdown in Accept, x-amzn-waf-ai-agent: none)\n    V->>F: GET /patterns/markdown-on-demand/guide.html\n    F->>S: GET guide.html (x-markdown: skipped, no KVS read, no beacon)\n  else an agent (Accept: text/markdown, or a bot name in x-amzn-waf-ai-agent)\n    V->>F: GET guide.html as an agent\n    F->>K: get md:/patterns/markdown-on-demand/guide.html\n    alt key found\n      K-->>F: /patterns/markdown-on-demand/guide.md\n      F->>S: GET guide.md (x-markdown: served)\n    else KeyNotFound\n      F-)A: cf.beacon POST /patterns/convert {uri, minute}\n      A-)Q: SendMessage (dedup on the body)\n      F->>S: GET guide.html (x-markdown: queued)\n      Q-)W: {uri, minute}\n      W->>S: GET guide.html, PUT guide.md (overwrites one left by a reset)\n      W->>K: PutKey md:<uri> = guide.md (reaches the edge in about a minute)\n    end\n  end\n  S-->>R: 200\n  R-->>V: response + x-markdown, Vary: Accept, User-Agent",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/10-markdown-on-demand/function.js",
+        "source": "import cf from 'cloudfront';\n\n// Viewer-request function on /patterns/markdown-on-demand/*.\n// AI agents get a markdown copy of a page, made the first time one asks for it:\n//   not an agent, or not a page -> x-markdown: skipped, no call\n//   KVS has md:<uri>            -> URI rewritten to the .md object, x-markdown: served, no call\n//   no key yet                  -> the HTML as usual, plus one cf.beacon { uri } to the queue,\n//                                  x-markdown: queued (x-markdown: failed if cf.beacon threw)\n//   GET reset?page=guide.html   -> one cf.beacon { action: reset } to the same queue, a JSON\n//                                  answer from the function itself, x-markdown: reset\n// A worker behind the queue converts the page, then writes the .md and the KVS key; a reset\n// deletes the key, so the next agent request is queued again.\n// KVS answers \"does markdown exist yet\" without spending the one network call.\n\nconst QUEUE_ORIGIN_ID = 'markdown-on-demand-queue';\nconst CONVERT_PATH = '/patterns/convert';\nconst PAGE_DIR = '/patterns/markdown-on-demand/';\nconst RESET_URI = PAGE_DIR + 'reset';\nconst INDEX_DOCUMENT = 'index.html';\nconst MARKDOWN_KEY_PREFIX = 'md:'; // md:<page uri> -> the .md object's URI, written by the worker\nconst MARKDOWN_TYPE = 'text/markdown';\nconst MS_PER_MINUTE = 60000;\n// .html under this path only, no dots elsewhere: the worker accepts exactly the same URIs.\nconst PAGE = /^\\/patterns\\/markdown-on-demand\\/[\\w\\/-]{1,200}\\.html$/;\n// An agent says so with Accept, or AWS WAF Bot Control labels it an AI bot. The web ACL writes\n// this header on every request here (the bot's name, or none), overwriting any viewer copy.\nconst WAF_AGENT_HEADER = 'x-amzn-waf-ai-agent';\nconst NOT_AN_AGENT = 'none';\nconst MARKDOWN_HEADER = 'x-markdown';\nconst ERROR_HEADER = 'x-markdown-error';\n\nfunction headerValue(headers, name) {\n  return headers[name] ? headers[name].value : '';\n}\n\nfunction describeError(error) {\n  return error.name + ': ' + error.message;\n}\n\nfunction isAgent(headers) {\n  const wafAgent = headerValue(headers, WAF_AGENT_HEADER);\n  return headerValue(headers, 'accept').indexOf(MARKDOWN_TYPE) !== -1 || (wafAgent !== '' && wafAgent !== NOT_AN_AGENT);\n}\n\n// The function's own answer to a reset: JSON, never cached.\nfunction jsonReply(statusCode, verdict, body) {\n  return {\n    statusCode: statusCode,\n    headers: {\n      'content-type': { value: 'application/json' },\n      'cache-control': { value: 'no-store' },\n      [MARKDOWN_HEADER]: { value: verdict },\n    },\n    body: JSON.stringify(body),\n  };\n}\n\n// The one network call, fire-and-forget. Throws only for an invalid call (TypeError):\n// a bad option, or a second call in one invocation.\nfunction sendToQueue(message) {\n  cf.beacon(CONVERT_PATH, {\n    originId: QUEUE_ORIGIN_ID,\n    method: 'POST',\n    headers: { 'content-type': 'application/json' }, // plain strings, not { value } objects\n    body: JSON.stringify(message),\n    logDeliveryErrors: true, // a delivery failure after the function returned goes to CloudWatch Logs\n  });\n}\n\n// Forget a page's markdown so the next agent request is queued again. Anyone may ask;\n// it only ever names md:<page> for a page this function would convert.\nfunction resetPage(request) {\n  const page = request.querystring.page ? PAGE_DIR + request.querystring.page.value : '';\n  if (!PAGE.test(page)) return jsonReply(400, 'invalid', { error: 'page must be a .html page under ' + PAGE_DIR });\n  try {\n    // at: each reset is its own message, never deduplicated with an earlier one.\n    sendToQueue({ action: 'reset', uri: page, at: Date.now() });\n  } catch (error) {\n    return jsonReply(500, 'failed', { error: describeError(error) });\n  }\n  return jsonReply(200, 'reset', { reset: 'queued', uri: page, note: 'the edge sees it in about a minute' });\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  // Only this function tells the response side what happened: drop viewer-supplied copies.\n  delete headers[MARKDOWN_HEADER];\n  delete headers[ERROR_HEADER];\n\n  if (request.uri === RESET_URI) return resetPage(request);\n\n  // S3 has no index document below the root: a folder means its index.html.\n  if (request.uri.endsWith('/')) request.uri += INDEX_DOCUMENT;\n  const uri = request.uri;\n  if (!isAgent(headers) || !PAGE.test(uri)) {\n    headers[MARKDOWN_HEADER] = { value: 'skipped' };\n    return request;\n  }\n\n  // 1. KVS. A missing key, or no KVS associated, throws: not converted yet.\n  try {\n    request.uri = await cf.kvs().get(MARKDOWN_KEY_PREFIX + uri);\n    headers[MARKDOWN_HEADER] = { value: 'served' };\n    return request;\n  } catch (error) {\n    // KeyNotFound: fall through and ask for a conversion.\n  }\n\n  // 2. Miss: the HTML goes out as usual; one message asks for markdown.\n  try {\n    // The URI and the minute: the FIFO queue dedups on the body, so a burst is one message,\n    // and a page reset a minute ago is not dropped as a repeat of its first conversion.\n    sendToQueue({ uri: uri, minute: Math.floor(Date.now() / MS_PER_MINUTE) });\n    headers[MARKDOWN_HEADER] = { value: 'queued' };\n  } catch (error) {\n    headers[MARKDOWN_HEADER] = { value: 'failed' };\n    headers[ERROR_HEADER] = { value: describeError(error) };\n  }\n  return request;\n}\n"
+      },
+      {
+        "hook": "viewer-response",
+        "file": "response-function.js",
+        "path": "patterns/10-markdown-on-demand/response-function.js",
+        "source": "// Viewer-response function on /patterns/markdown-on-demand/*. No network call.\n// An S3 origin echoes nothing, so this copies the x-markdown verdict that function.js left\n// on the request onto the response, and adds Vary: the same URL answers HTML or markdown.\n// CloudFront skips viewer-response when the origin returns 400 or higher (a missing page).\n\nconst VERDICT_HEADERS = ['x-markdown', 'x-markdown-error'];\nconst VARY = 'Accept, User-Agent'; // Accept, and the user agent Bot Control labels by\n\nasync function handler(event) {\n  const requestHeaders = event.request.headers;\n  const response = event.response;\n  VERDICT_HEADERS.forEach((name) => {\n    if (requestHeaders[name]) response.headers[name] = { value: requestHeaders[name].value };\n  });\n  response.headers['vary'] = { value: VARY };\n  return response;\n}\n"
+      }
+    ]
+  },
+  {
+    "number": "11",
+    "folder": "11-edge-waiting-room",
+    "id": "edge-waiting-room",
+    "title": "Edge waiting room",
+    "summary": "A virtual waiting room at the edge. A new browser (past AWS WAF's CAPTCHA) spends the function's one cf.fetch to draw a ticket from a DynamoDB counter (API Gateway, no Lambda); every refresh after that compares the signed ticket cookie with a watermark in KVS, with no call. An admission Lambda raises the watermark once a minute.",
+    "lesson": "The queue is two integers, a counter and a watermark, and membership is an HMAC-signed cookie: the one network call is spent once per viewer, never per refresh. Here the call IS the protection, so it fails closed, the reverse of 03 and 08.",
+    "tags": [
+      "resilience"
+    ],
+    "hooks": [
+      "viewer-request"
+    ],
+    "tryPath": "/patterns/edge-waiting-room/shop",
+    "method": "GET",
+    "expect": "Try it (a fetch, not a page load): 503, x-wr: browsers-only, no ticket. Open it in a browser tab instead: one AWS WAF CAPTCHA (only on this path), then a waiting page with your ticket and your position; within about two minutes (one admission tick plus KVS propagation) a 302 sets wr_a and the protected origin's JSON says x-wr: admitted.",
+    "requests": [
+      {
+        "label": "Join the queue",
+        "frame": {
+          "milestones": [
+            "Prove you're a person",
+            "Ticket drawn",
+            "Waiting",
+            "Admitted"
+          ],
+          "skipUnlessSeen": [
+            {
+              "seen": [
+                "captcha",
+                "challenge"
+              ],
+              "steps": [
+                "GET /patterns/edge-waiting-room/shop, no aws-waf-token",
+                "405 CAPTCHA on the first visit"
+              ],
+              "note": "No CAPTCHA this time: your browser already had AWS WAF's token."
+            },
+            {
+              "seen": [
+                "queued",
+                "busy",
+                "starting"
+              ],
+              "steps": [
+                "GET + aws-waf-token",
+                "request + x-amzn-waf-wr-token-id",
+                "get queue-state, queue-secret-cur, queue-secret-prev"
+              ]
+            },
+            {
+              "seen": [
+                "queued",
+                "busy"
+              ],
+              "steps": [
+                "cf.fetch POST /patterns/enqueue"
+              ]
+            },
+            {
+              "seen": [
+                "queued"
+              ],
+              "steps": [
+                "UpdateItem",
+                "{\"n\": 42}",
+                "200 waiting page + wr_t"
+              ],
+              "note": "No new ticket: you already hold one, so the doorman makes no call."
+            },
+            {
+              "seen": [
+                "waiting",
+                "paused"
+              ],
+              "steps": [
+                "GET + wr_t",
+                "get queue-state",
+                "200 waiting page, position, no call"
+              ],
+              "note": "No wait: your number was already being served."
+            }
+          ],
+          "states": [
+            {
+              "id": "captcha",
+              "milestone": 0,
+              "show": true,
+              "label": "AWS WAF asks for a CAPTCHA on the first visit: solve it in the frame below to join the queue",
+              "when": {
+                "selector": "#captcha-container"
+              },
+              "take": [
+                "a browser"
+              ],
+              "lastStep": 12,
+              "tone": "warn"
+            },
+            {
+              "id": "challenge",
+              "milestone": 0,
+              "label": "AWS WAF's silent challenge: your browser is proving it is a browser",
+              "when": {
+                "selector": "#challenge-container"
+              },
+              "take": [
+                "a browser"
+              ],
+              "lastStep": 12,
+              "tone": "ok"
+            },
+            {
+              "id": "admitted",
+              "milestone": 3,
+              "done": true,
+              "label": "Admitted: the protected origin answered, {message}",
+              "when": {
+                "json": {
+                  "x-wr": "^admitted$"
+                }
+              },
+              "take": [
+                "a browser"
+              ],
+              "tone": "ok"
+            },
+            {
+              "id": "queued",
+              "milestone": 1,
+              "label": "Ticket {1} drawn: the function's one cf.fetch added one to the counter",
+              "when": {
+                "text": "Your ticket is (\\d+)"
+              },
+              "take": [
+                "a browser"
+              ],
+              "lastStep": 19,
+              "tone": "ok"
+            },
+            {
+              "id": "waiting",
+              "milestone": 2,
+              "label": "In line: position about {1}, roughly {2} min. Each refresh is a KVS read, no call",
+              "when": {
+                "text": "Position about (\\d+), roughly (\\d+) min"
+              },
+              "take": [
+                "a browser"
+              ],
+              "lastStep": 22,
+              "tone": "ok"
+            },
+            {
+              "id": "paused",
+              "milestone": 2,
+              "label": "The queue is paused: you keep your place in line",
+              "when": {
+                "title": "paused"
+              },
+              "take": [
+                "a browser"
+              ],
+              "lastStep": 22,
+              "tone": "warn"
+            },
+            {
+              "id": "starting",
+              "milestone": 0,
+              "label": "The queue is starting: the page tries again in a moment",
+              "when": {
+                "title": "starting"
+              },
+              "take": [
+                "a browser"
+              ],
+              "lastStep": 15,
+              "tone": "warn"
+            },
+            {
+              "id": "busy",
+              "milestone": 1,
+              "label": "Busy: the counter could not be reached, so no ticket yet; the page retries",
+              "when": {
+                "title": "^Busy"
+              },
+              "take": [
+                "a browser"
+              ],
+              "lastStep": 16,
+              "tone": "bad"
+            }
+          ]
+        }
+      },
+      {
+        "label": "What a bot gets"
+      },
+      {
+        "label": "Leave the line (clear my cookies)",
+        "path": "/patterns/edge-waiting-room/leave",
+        "credentials": "same-origin"
+      }
+    ],
+    "outcomes": [
+      {
+        "label": "What a bot gets: the viewer-request function answers 503 browsers-only, so no ticket is drawn",
+        "when": {
+          "headers": {
+            "x-wr": "^browsers-only$"
+          }
+        },
+        "tone": "warn",
+        "take": [
+          "a script"
+        ],
+        "stopAfter": "a script"
+      },
+      {
+        "label": "Admitted: the protected origin answered",
+        "when": {
+          "headers": {
+            "x-wr": "^admitted$"
+          }
+        },
+        "tone": "ok",
+        "take": [
+          "a browser"
+        ]
+      },
+      {
+        "label": "Left the line: your place is freed for the next person, and your ticket, pass and WAF token are cleared. Open it in a tab to start over (CAPTCHA first)",
+        "when": {
+          "headers": {
+            "x-wr": "^left$"
+          }
+        },
+        "take": [
+          "leave the line"
+        ],
+        "stopAfter": "leave the line",
+        "tone": "ok"
+      }
+    ],
+    "waf": "Bot Control in count mode gives each browser a token id; a first page load gets one CAPTCHA, and the silent challenge takes over once it expires, so scripts never draw a ticket.",
+    "gist": "A gatekeeper stops scripts; the doorman hands real visitors a numbered ticket and lets them in when their number comes up.",
+    "actors": {
+      "V": {
+        "name": "You",
+        "icon": "🧑‍💻",
+        "at": "viewer"
+      },
+      "W": {
+        "name": "Gatekeeper",
+        "icon": "🛡️",
+        "at": "waf"
+      },
+      "F": {
+        "name": "Doorman",
+        "icon": "💂",
+        "at": "viewer-request"
+      },
+      "K": {
+        "name": "Notebook",
+        "icon": "📒",
+        "at": "kvs",
+        "service": "CloudFront KeyValueStore (shared)",
+        "access": "read by the function; the admission Lambda raises queue-state (UpdateKeys)"
+      },
+      "A": {
+        "name": "Ticket machine",
+        "icon": "🎟️",
+        "at": "origin",
+        "service": "API Gateway REST API with a DynamoDB integration (no Lambda)",
+        "access": "CloudFront adds the x-api-key header"
+      },
+      "D": {
+        "name": "Counter",
+        "icon": "🔢",
+        "at": "backend",
+        "service": "DynamoDB table (ticket counters, 8 shards)",
+        "access": "API Gateway's IAM role runs UpdateItem ADD n 1"
+      },
+      "L": {
+        "name": "Usher",
+        "icon": "🙋",
+        "at": "backend",
+        "lane": "background",
+        "service": "Lambda function (admission, every minute)",
+        "access": "EventBridge schedule; reads the counters, writes KVS"
+      }
+    },
+    "story": [
+      "A script asks for the shop: not a page load.",
+      "The gatekeeper sets no puzzle for that and lets it through.",
+      "The doorman checks his notebook, as for everyone.",
+      "No ticket for a script: come back in a browser. No phone call.",
+      "You ask to leave the line, with your ticket.",
+      "The gatekeeper lets it through: not a page load.",
+      "The doorman checks his notebook and your ticket's signature: still in line?",
+      "Yes: he drops a note to the ticket machine and doesn't wait for an answer.",
+      "The machine crosses your number off: even sent twice, it is crossed off once.",
+      "The doorman tears up your ticket and your pass, and the gatekeeper's too.",
+      "Your browser asks for the shop, without a pass from the gatekeeper.",
+      "The gatekeeper tests your browser: a CAPTCHA the first time, a silent check after that; then the page reloads.",
+      "Back again, now with the gatekeeper's pass.",
+      "The gatekeeper lets you through and tells the doorman your pass number.",
+      "The doorman checks his notebook: which number is being served?",
+      "You have no ticket yet: he asks the ticket machine for one.",
+      "The machine adds one to the counter.",
+      "Your number comes back.",
+      "You get the waiting room, and your ticket as a signed cookie.",
+      "Your browser comes back with your ticket, every few seconds.",
+      "The doorman checks your ticket and his notebook: no phone call.",
+      "Still waiting: here is your place in line.",
+      "Every minute, the usher looks at how many are waiting.",
+      "And moves the 'now serving' number up past five people still waiting, skipping anyone who left.",
+      "Your browser checks back; your number is being served.",
+      "The doorman gives you an entry pass, good for two minutes.",
+      "You come back with the entry pass.",
+      "The doorman lets you into the shop.",
+      "The shop answers."
+    ],
+    "diagram": "sequenceDiagram\n  autonumber\n  participant V as Browser\n  participant W as AWS WAF (this path only)\n  participant F as viewer-request function\n  participant K as KVS\n  participant A as API Gateway REST API (x-api-key)\n  participant D as DynamoDB counters\n  participant L as admission Lambda (every minute)\n  alt a script (not a page load)\n    V->>W: GET /patterns/edge-waiting-room/shop, Accept: */*\n    W->>F: passes: CAPTCHA and challenge apply to page loads only\n    F->>K: get queue-state, queue-secret-cur, queue-secret-prev\n    F-->>V: 503 browsers-only + Retry-After: 5, no ticket, no call\n  else leave the line\n    V->>W: GET /patterns/edge-waiting-room/leave + wr_t\n    W->>F: passes: not a page load\n    F->>K: get queue-state, queue-secret-cur, queue-secret-prev\n    F-)A: cf.beacon POST /patterns/leave {epoch, ticket}, only for a signed ticket still in line\n    A-)D: UpdateItem e<epoch>-left ADD freed {ticket} (a number set)\n    F-->>V: 200 left (x-wr-place: freed), wr_t, wr_a and aws-waf-token expired\n  else a browser\n    V->>W: GET /patterns/edge-waiting-room/shop, no aws-waf-token\n    W-->>V: 405 CAPTCHA on the first visit (silent challenge once it expires)\n    V->>W: GET + aws-waf-token\n    W->>F: request + x-amzn-waf-wr-token-id (Bot Control label, interpolated)\n  end\n  F->>K: get queue-state, queue-secret-cur, queue-secret-prev\n  F->>A: cf.fetch POST /patterns/enqueue {epoch, shard}\n  A->>D: UpdateItem e<epoch>-<shard> ADD n 1\n  D-->>F: {\"n\": 42}, ticket = (42 - 1) * 8 + shard\n  F-->>V: 200 waiting page + wr_t (no-store)\n  loop every 5 s\n    V->>F: GET + wr_t\n    F->>K: get queue-state\n    F-->>V: 200 waiting page, position, no call\n  end\n  L->>D: BatchGetItem the 8 shards, GetItem the freed set\n  L->>K: UpdateKeys queue-state {serving past STEP waiting tickets, freed ones skipped}\n  V->>F: GET + wr_t, ticket < serving\n  F-->>V: 302 same URL + wr_a (bound to this client, 120 s)\n  V->>F: GET + wr_a\n  F->>A: forward (x-wr: admitted)\n  A-->>V: 200 from the protected origin",
+    "code": [
+      {
+        "hook": "viewer-request",
+        "file": "function.js",
+        "path": "patterns/11-edge-waiting-room/function.js",
+        "source": "import cf from 'cloudfront';\nimport crypto from 'crypto';\n\n// Viewer-request: a virtual waiting room. Design, cases and the cookie contract: README.\n\nconst QUEUE_ORIGIN_ID = 'edge-waiting-room';\nconst PATH_PREFIX = '/patterns/edge-waiting-room/';\nconst STATE_KEY = 'queue-state'; // from the admission Lambda: { mode, epoch, serving, step, tick }\nconst SECRET_KEYS = ['queue-secret-cur', 'queue-secret-prev']; // cur signs, either verifies\nconst SHARDS = 8; // counter items; the admission Lambda reads the same number\nconst ADMIT_SECONDS = 120; // wr_a lifetime; renewing it is free while wr_t is below the watermark\nconst TICKET_SECONDS = 7200;\nconst STALE_MS = 5 * 60 * 1000; // queue-state older than this: the admission Lambda stopped ticking\nconst REFRESH_SECONDS = 5;\nconst TICKET_COOKIE = 'wr_t';\nconst PASS_COOKIE = 'wr_a';\nconst COOKIE_ATTRIBUTES = 'Path=' + PATH_PREFIX + '; Secure; HttpOnly; SameSite=Lax';\nconst JWT_HEADER = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.'; // {\"alg\":\"HS256\",\"typ\":\"JWT\"}, the only header accepted\nconst DOC = '<!doctype html><meta charset=\"utf-8\">';\nconst VERDICT_HEADER = 'x-wr';\nconst PLACE_HEADER = 'x-wr-place';\n\nconst headerValue = (headers, name) => (headers[name] ? headers[name].value : '');\nconst sign = (secret, text) => crypto.createHmac('sha256', secret).update(text).digest('base64url');\nconst sha256 = (text, encoding) => crypto.createHash('sha256').update(text).digest(encoding);\n\nfunction signJwt(claims, secret) {\n  const signed = JWT_HEADER + Buffer.from(JSON.stringify(claims)).toString('base64url');\n  return signed + '.' + sign(secret, signed);\n}\n\n// Constant time: timing never tells how much of a signature matched.\nfunction constantTimeEquals(expected, actual) {\n  let difference = expected.length ^ actual.length;\n  for (let i = 0; i < expected.length; i++) difference |= expected.charCodeAt(i) ^ actual.charCodeAt(i);\n  return difference === 0;\n}\n\n// The claims of a token this queue signed, or null.\nfunction verifyJwt(cookie, secrets) {\n  const token = cookie ? cookie.value : '';\n  const dot = token.lastIndexOf('.');\n  if (token.indexOf(JWT_HEADER) !== 0 || dot <= JWT_HEADER.length) return null;\n  let valid = false;\n  for (let i = 0; i < secrets.length; i++) {\n    if (constantTimeEquals(sign(secrets[i], token.slice(0, dot)), token.slice(dot + 1))) valid = true;\n  }\n  try {\n    return valid ? JSON.parse(Buffer.from(token.slice(JWT_HEADER.length, dot), 'base64url').toString()) : null;\n  } catch (error) {\n    return null;\n  }\n}\n\n// no-store: any answer may carry a ticket or a pass.\nfunction respond(statusCode, verdict, extraHeaders, body) {\n  const headers = { 'cache-control': { value: 'no-store' }, [VERDICT_HEADER]: { value: verdict },\n    'content-type': { value: 'text/html; charset=utf-8' } };\n  const response = { statusCode: statusCode, headers: Object.assign(headers, extraHeaders) };\n  if (body) response.body = body;\n  return response;\n}\n\nfunction withCookie(response, name, value, maxAge) {\n  response.cookies = response.cookies || {};\n  response.cookies[name] = { value: value, attributes: COOKIE_ATTRIBUTES + '; Max-Age=' + maxAge };\n  return response;\n}\n\nfunction waitingPage(verdict, title, line) {\n  const html = DOC + '<meta http-equiv=\"refresh\" content=\"' + REFRESH_SECONDS + '\">' +\n    '<title>' + title + '</title><body style=\"font:18px system-ui;max-width:34em;margin:4em auto\">' +\n    '<h1>' + title + '</h1><p>' + line + '</p>' +\n    '<p><a href=\"leave\">Leave the line</a></p>';\n  return respond(200, verdict, { 'retry-after': { value: String(REFRESH_SECONDS) } }, html);\n}\n\n// Clears the HttpOnly cookies and aws-waf-token (both Domain forms), so the CAPTCHA comes back.\nfunction leftPage(host, place) {\n  const page = respond(200, 'left', { [PLACE_HEADER]: { value: place } },\n    DOC + '<title>You left the line</title><p>You left the line. <a href=\"shop\">Join again</a></p>');\n  withCookie(withCookie(page, TICKET_COOKIE, '', 0), PASS_COOKIE, '', 0);\n  const expired = (domain) => ({ value: '', attributes: 'Path=/; Secure; ' + domain + 'Max-Age=0' });\n  const wafToken = [expired(''), expired('Domain=' + host + '; ')];\n  page.cookies['aws-waf-token'] = Object.assign(expired(''), { multiValue: wafToken });\n  return page;\n}\n\n// KVS reads, not network calls; a missing key leaves state null or a secret out.\nasync function readQueue() {\n  const store = cf.kvs();\n  const reads = await Promise.allSettled([\n    store.get(STATE_KEY, { format: 'json' }), store.get(SECRET_KEYS[0]), store.get(SECRET_KEYS[1]),\n  ]);\n  return {\n    state: reads[0].status === 'fulfilled' ? reads[0].value : null,\n    secrets: reads.slice(1).filter((read) => read.status === 'fulfilled' && read.value).map((read) => read.value),\n  };\n}\n\n// One cf.beacon puts the ticket in a skip set (a set: a replayed cookie frees one place).\nfunction leaveLine(state, ticket, host) {\n  if (ticket < 0 || ticket < state.serving) return leftPage(host, 'none');\n  try {\n    cf.beacon('/patterns/leave', {\n      originId: QUEUE_ORIGIN_ID,\n      method: 'POST',\n      headers: { 'content-type': 'application/json' },\n      body: JSON.stringify({ epoch: state.epoch, ticket: ticket }),\n      logDeliveryErrors: true, // late failures go to CloudWatch Logs\n    });\n    return leftPage(host, 'freed');\n  } catch (error) {\n    return leftPage(host, 'failed'); // only an invalid call throws\n  }\n}\n\n// wr_a binds to a hash of WAF token id, user agent and JA4: a copied pass fails.\nfunction clientBinding(headers) {\n  const client = [headerValue(headers, 'x-amzn-waf-wr-token-id'), headerValue(headers, 'user-agent'),\n    headerValue(headers, 'cloudfront-viewer-ja4-fingerprint')].join('|');\n  return sha256(client, 'base64url').slice(0, 22);\n}\n\nfunction positionPage(ticket, state, now) {\n  if (now * 1000 - state.tick > STALE_MS) return waitingPage('paused', 'The queue is paused', 'You keep your place in line.');\n  const ahead = ticket - state.serving + 1;\n  const minutes = Math.ceil(ahead / Math.max(state.step, 1));\n  return waitingPage('waiting', 'You are in line', 'Position about <b>' + ahead + '</b>, roughly ' + minutes + ' min.');\n}\n\n// The one network call: the shard's counter hands out its next number, or throws.\nasync function drawTicket(epoch, shard) {\n  const enqueueResponse = await cf.fetch('/patterns/enqueue', {\n    originId: QUEUE_ORIGIN_ID,\n    method: 'POST',\n    headers: { 'content-type': 'application/json' },\n    body: JSON.stringify({ epoch: epoch, shard: shard }),\n    includeBody: true,\n  });\n  if (!enqueueResponse.ok) throw new Error('enqueue answered ' + enqueueResponse.status); // 429: API Gateway throttled\n  const text = await enqueueResponse.text();\n  const ticket = (JSON.parse(text).n - 1) * SHARDS + shard;\n  if (!(ticket >= 0)) throw new Error('enqueue sent no counter');\n  return ticket;\n}\n\nasync function handler(event) {\n  const request = event.request;\n  const headers = request.headers;\n  const now = Math.floor(Date.now() / 1000); // JWT times are in seconds\n  delete headers[VERDICT_HEADER]; // only this function tells the origin what happened\n\n  const queue = await readQueue();\n  const state = queue.state;\n  const secrets = queue.secrets;\n  // The epoch makes a counter reset safe.\n  const claims = state ? verifyJwt(request.cookies[TICKET_COOKIE], secrets) : null;\n  const ticket = claims && claims.epoch === state.epoch && typeof claims.ticket === 'number' ? claims.ticket : -1;\n\n  if (request.uri === PATH_PREFIX + 'leave') return leaveLine(state, ticket, headerValue(headers, 'host'));\n  if (state && state.mode === 'off') {\n    headers[VERDICT_HEADER] = { value: 'off' };\n    return request;\n  }\n  if (!state || !secrets.length) return waitingPage('starting', 'The queue is starting', 'Please wait a moment.');\n\n  const binding = clientBinding(headers);\n  const pass = verifyJwt(request.cookies[PASS_COOKIE], secrets);\n  if (pass && pass.epoch === state.epoch && pass.exp > now && pass.bnd === binding) {\n    headers[VERDICT_HEADER] = { value: 'admitted' };\n    return request;\n  }\n\n  // In line. Tickets below the watermark are admitted.\n  if (ticket >= 0) {\n    if (ticket >= state.serving) return positionPage(ticket, state, now);\n    const admitted = respond(302, 'admit', { location: { value: request.uri } });\n    const newPass = signJwt({ epoch: state.epoch, exp: now + ADMIT_SECONDS, bnd: binding }, secrets[0]);\n    return withCookie(admitted, PASS_COOKIE, newPass, ADMIT_SECONDS);\n  }\n\n  // No ticket. Only a browser page load may draw one.\n  if (request.method !== 'GET' || headerValue(headers, 'accept').indexOf('text/html') === -1) {\n    return respond(503, 'browsers-only',\n      { 'content-type': { value: 'application/json' }, 'retry-after': { value: String(REFRESH_SECONDS) } },\n      '{\"waitingRoom\":\"open this URL in a browser\"}');\n  }\n\n  // A hash of the request id, not Math.random(): no network call may follow random values.\n  const shard = parseInt(sha256(event.context.requestId, 'hex').slice(0, 8), 16) % SHARDS;\n  let drawn;\n  try {\n    drawn = await drawTicket(state.epoch, shard);\n  } catch (error) {\n    // Fail closed: no ticket, the page retries.\n    return waitingPage('busy', 'Busy, retrying', 'The line is very long right now (' + error.name + ').');\n  }\n  const queued = waitingPage('queued', 'You are in line', 'Your ticket is <b>' + drawn + '</b>. Finding your position...');\n  return withCookie(queued, TICKET_COOKIE, signJwt({ epoch: state.epoch, ticket: drawn, iat: now }, secrets[0]), TICKET_SECONDS);\n}\n"
+      }
+    ]
+  }
+]

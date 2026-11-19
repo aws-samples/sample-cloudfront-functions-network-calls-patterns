@@ -1,0 +1,119 @@
+{
+  "id": "ab-global-table",
+  "title": "Sticky A/B variant, KVS warm set over a DynamoDB global table",
+  "summary": "The function reads the user's variant from KVS and only calls the origin on a miss; the origin assigns it once in DynamoDB and fills KVS lazily.",
+  "lesson": "Fetch only on a miss: pay the extra execution once per key, then serve from the edge until TTL evicts it.",
+  "tags": [
+    "ai-gateway",
+    "routing"
+  ],
+  "hooks": [
+    "viewer-request",
+    "viewer-response"
+  ],
+  "tryPath": "/patterns/ab-global-table/",
+  "method": "GET",
+  "expect": "JSON echo with x-ab-variant and x-ab-source; the response carries x-ab-hooks: request+response and Set-Cookie uid=<16 hex> (first visit), set by the viewer-response function, not the origin. x-ab-variant is A or B, x-ab-source origin on a first visit (one call) and kvs on a return visit (no call), plus Set-Cookie ab=<variant>. Any failure falls back to x-ab-variant control, x-ab-source fallback and x-ab-error, with no ab cookie.",
+  "requests": [
+    {
+      "label": "Visit (keeps my cookies)",
+      "credentials": "same-origin"
+    },
+    {
+      "label": "Visit as a stranger (no cookies)"
+    }
+  ],
+  "outcomes": [
+    {
+      "label": "KVS hit: variant served from the edge, no call",
+      "when": {
+        "headers": {
+          "x-ab-source": "^kvs$"
+        }
+      },
+      "take": [
+        "KVS hit"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "KVS miss: one call assigned the variant",
+      "when": {
+        "headers": {
+          "x-ab-source": "^origin$"
+        }
+      },
+      "take": [
+        "miss"
+      ],
+      "tone": "ok"
+    },
+    {
+      "label": "Lookup failed: control variant, no ab cookie",
+      "when": {
+        "headers": {
+          "x-ab-source": "^fallback$"
+        }
+      },
+      "take": [
+        "any failure"
+      ],
+      "tone": "warn"
+    }
+  ],
+  "gist": "The doorman looks up which room you got last time; only new guests get a room picked, once.",
+  "actors": {
+    "V": {
+      "name": "You",
+      "icon": "🧑‍💻",
+      "at": "viewer"
+    },
+    "F": {
+      "name": "Doorman",
+      "icon": "💂",
+      "at": "viewer-request"
+    },
+    "K": {
+      "name": "Notebook",
+      "icon": "📒",
+      "at": "kvs",
+      "service": "CloudFront KeyValueStore (shared)",
+      "access": "read by the function; written by the loader and evictor (UpdateKeys)"
+    },
+    "L": {
+      "name": "Host",
+      "icon": "🎲",
+      "at": "origin",
+      "service": "Lambda Web Function",
+      "access": "OAC signs it (SigV4), plus a secret x-origin-verify header"
+    },
+    "D": {
+      "name": "Big ledger",
+      "icon": "📚",
+      "at": "backend",
+      "service": "DynamoDB global table",
+      "access": "the loader's IAM role; its stream feeds an evictor Lambda"
+    },
+    "R": {
+      "name": "Exit greeter",
+      "icon": "👋",
+      "at": "viewer-response"
+    }
+  },
+  "story": [
+    "You arrive, maybe with your wristband.",
+    "No wristband? The doorman makes you a new one.",
+    "He looks you up in his notebook.",
+    "Found: same room as last time, no phone call.",
+    "Not found: he asks the host to pick a room.",
+    "The host writes your room in the big ledger, once.",
+    "And copies it into the doorman's notebook for next time.",
+    "Room A or room B.",
+    "Something broke: you get the normal room.",
+    "You walk to your room.",
+    "The room answers.",
+    "On the way out, the greeter puts your wristbands on.",
+    "You get your page.",
+    "When the ledger changes, the notebook changes too."
+  ]
+}
